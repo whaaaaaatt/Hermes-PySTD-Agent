@@ -550,6 +550,9 @@ class AIAgent:
         tool_obj = self.registry.get(name)
         if tool_obj is not None:
             tool_obj._emit_fn = self._emit
+        # Inject parent agent context for tools that need it (e.g. delegate_task).
+        if name == "delegate_task":
+            kwargs["parent_agent"] = self
         return self.registry.call(name, **kwargs)
 
     # ------------------------------------------------------------------
@@ -558,9 +561,12 @@ class AIAgent:
 
     def _to_chat_message(self, m: Message) -> ChatMessage:
         # content may be str (plain text) or list (multimodal parts).
+        # Preserve empty strings for assistant tool-call turns — converting
+        # "" to None causes the serialiser to drop the "content" key, which
+        # some providers reject with "content is not set".
         return ChatMessage(
             role=m.role,
-            content=m.content if m.content else None,
+            content=m.content,
             name=m.name,
             tool_calls=m.tool_calls,
             tool_call_id=m.tool_call_id,

@@ -866,6 +866,18 @@ class Repl:
                 self._on_event(kind, payload)
         agent.on_event = event_sink
         result = agent.run_turn(user_message)
+        # Auto-title from the first user message if the session is still
+        # untitled — mirrors the web frontend's behaviour so that CLI
+        # sessions show a meaningful name in the web UI session list.
+        if self._active_session_id:
+            from ..paths import get_state_db_path
+            from ..state import StateStore
+            _st = StateStore(get_state_db_path())
+            _sess = _st.get_session(self._active_session_id)
+            if _sess and not _sess.title:
+                title = (user_message or "").strip()[:40]
+                if title:
+                    _st.update_session(self._active_session_id, title=title)
         # Print a usage footer with optional context window progress bar.
         u = result.usage
         if u.get("total_tokens"):
