@@ -4,6 +4,14 @@
 
 <p align="center"><strong>English</strong> | <a href="./README_CN.md">中文</a></p>
 
+<p align="center">
+  <a href="https://github.com/whaaaaaatt/Hermes-PySTD-Agent/stargazers">
+    <img src="https://img.shields.io/github/stars/whaaaaaatt/Hermes-PySTD-Agent?style=social" alt="Star this repo" />
+  </a>
+</p>
+
+<p align="center"><em>If you find Hermes-Lite helpful, please consider giving it a ⭐ — it helps others discover the project!</em></p>
+
 ---
 
 &emsp;&emsp;**Hermes-PySTD-Agent** (or simply **Hermes-Lite**) is a reimplementation of [hermes-agent](https://github.com/NousResearch/hermes-agent) using **only the Python standard library**. Born from the difficulty of installing the original hermes-agent in network-restricted environments, it aims to be a simple, zero-dependency, out-of-the-box AI coding assistant.

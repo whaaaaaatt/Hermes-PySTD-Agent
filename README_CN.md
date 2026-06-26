@@ -4,6 +4,14 @@
 
 <p align="center"><a href="./README.md">English</a> | <strong>中文</strong></p>
 
+<p align="center">
+  <a href="https://github.com/whaaaaaatt/Hermes-PySTD-Agent/stargazers">
+    <img src="https://img.shields.io/github/stars/whaaaaaatt/Hermes-PySTD-Agent?style=social" alt="Star this repo" />
+  </a>
+</p>
+
+<p align="center"><em>如果 Hermes-Lite 对你有帮助，请考虑给个 ⭐ — 这能帮助更多人发现这个项目！</em></p>
+
 ---
 
 &emsp;&emsp;**Hermes-PySTD-Agent**（或简称 **Hermes-Lite**）是 [hermes-agent](https://github.com/NousResearch/hermes-agent) 的 **纯 Python 标准库** 重写版。出于网络受限环境下安装原版 hermes-agent 的困难，本项目以简单、零依赖、开箱即用为出发点进行了移植。
