@@ -1162,6 +1162,34 @@ def _build_router(state: ServerState) -> Router:
         output = load_job_output(kw["jid"])
         return {"output": output}
 
+    @r.route("GET", r"/api/cron/(?P<jid>[a-f0-9]{12})/sessions")
+    def get_cron_sessions(handler, body, kw):
+        _check_auth(handler)
+        import re as _re
+        jid = kw["jid"]
+        prefix = f"cron_{jid}_"
+        sessions = state.state.list_sessions_by_prefix(prefix)
+        result = []
+        for s in sessions:
+            msgs = state.state.list_messages(s.id)
+            cleaned = []
+            for m in msgs:
+                if m.role not in ("user", "assistant"):
+                    continue
+                content = (m.content or "").strip()
+                # Strip <system-reminder>...</system-reminder> blocks.
+                content = _re.sub(r"<system-reminder>.*?</system-reminder>", "", content, flags=_re.DOTALL).strip()
+                if not content:
+                    continue
+                cleaned.append({"role": m.role, "content": content})
+            result.append({
+                "id": s.id,
+                "title": s.title,
+                "created_at": s.created_at,
+                "messages": cleaned,
+            })
+        return {"sessions": result}
+
     return r
 
 

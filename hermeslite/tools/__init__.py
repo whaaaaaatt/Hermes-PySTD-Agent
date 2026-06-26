@@ -27,5 +27,6 @@ from . import data  # noqa: F401
 from . import extra  # noqa: F401
 from . import skill_manage_tool  # noqa: F401
 from . import delegate  # noqa: F401
+from . import cron_tool  # noqa: F401
 
 __all__ = ["registry", "Tool", "ToolResult", "ToolRegistry"]

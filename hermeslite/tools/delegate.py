@@ -185,9 +185,11 @@ def _run_single_child(
 ) -> Dict[str, Any]:
     """Run a pre-built child agent in the current thread.
 
-    Returns a structured result dict.
+    Returns a structured result dict. The child session is deleted after
+    completion — only the summary is kept.
     """
     start = time.monotonic()
+    child_session_id = child.session_id
 
     # Emit subagent start event to parent.
     parent_agent._emit("subagent_event", {
@@ -215,6 +217,9 @@ def _run_single_child(
             },
         })
 
+        # Delete child session — only the summary is returned to parent.
+        _cleanup_child_session(parent_agent.state, child_session_id)
+
         return {
             "status": "completed",
             "summary": summary,
@@ -238,11 +243,22 @@ def _run_single_child(
             },
         })
 
+        # Clean up child session on failure too.
+        _cleanup_child_session(parent_agent.state, child_session_id)
+
         return {
             "status": "failed",
             "error": str(exc),
             "duration_seconds": duration,
         }
+
+
+def _cleanup_child_session(state_store: Any, session_id: str) -> None:
+    """Delete a child session and its messages from the database."""
+    try:
+        state_store.delete_session(session_id)
+    except Exception:  # noqa: BLE001
+        logger.debug("Failed to delete child session %s", session_id)
 
 
 # ---------------------------------------------------------------------------

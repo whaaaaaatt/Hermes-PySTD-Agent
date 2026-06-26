@@ -392,16 +392,23 @@ def compute_next_run(
             spec = CronSpec.parse(expr)
         except ValueError:
             return None
-        after = datetime.now(timezone.utc)
+        # Interpret cron expressions in local time so "0 5 * * *" means
+        # 05:00 in the user's timezone, not UTC.
+        local_tz = datetime.now().astimezone().tzinfo
+        after_local = datetime.now(local_tz)
         if last_run_at:
             try:
                 after = datetime.fromisoformat(last_run_at)
                 if after.tzinfo is None:
                     after = after.replace(tzinfo=timezone.utc)
+                after_local = after.astimezone(local_tz)
             except (ValueError, TypeError):
-                after = datetime.now(timezone.utc)
-        next_dt = _next_cron_match(spec, after)
-        return next_dt.isoformat() if next_dt else None
+                after_local = datetime.now(local_tz)
+        next_local = _next_cron_match(spec, after_local)
+        if next_local is None:
+            return None
+        # Convert to UTC for storage so get_due_jobs() comparisons work.
+        return next_local.astimezone(timezone.utc).isoformat()
 
     return None
 
@@ -705,13 +712,19 @@ def _run_agent(job: Job) -> str:
 
     profile = active_profile(cfg)
     state = StateStore(get_state_db_path())
-    session_id = f"cron_{job.id}_{int(time.time())}"
+    run_ts = int(time.time())
+    session_id = f"cron_{job.id}_{run_ts}"
 
     agent = AIAgent(
         cfg=cfg, profile=profile, registry=tool_registry,
         state=state, session_id=session_id, stream=False,
         model=job.model,
     )
+    # Name the session with job name + run time for display.
+    run_dt = datetime.fromtimestamp(run_ts)
+    title = f"{job.name or job.id} @ {run_dt.strftime('%Y-%m-%d %H:%M')}"
+    state.update_session(session_id, title=title)
+
     result = agent.run_turn(job.prompt)
     return result.final_text or "(no response)"
 

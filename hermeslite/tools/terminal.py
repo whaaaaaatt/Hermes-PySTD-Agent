@@ -382,7 +382,8 @@ class TerminalTool(Tool):
                     stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
-                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
                 )
                 _pipe_stdin(proc, sudo_stdin)
                 try:
@@ -408,7 +409,8 @@ class TerminalTool(Tool):
                         argv,
                         cwd=workdir,
                         capture_output=True,
-                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
                         timeout=effective_timeout,
                         check=False,
                     )

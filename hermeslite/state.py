@@ -313,6 +313,15 @@ class StateStore:
             ).fetchall()
         return [_row_to_session(r) for r in rows]
 
+    def list_sessions_by_prefix(self, prefix: str, limit: int = 50) -> List[Session]:
+        """Return sessions whose ID starts with ``prefix`` (e.g. 'cron_{job_id}_')."""
+        with self.transaction() as c:
+            rows = c.execute(
+                "SELECT * FROM sessions WHERE id LIKE ? ORDER BY created_at DESC LIMIT ?",
+                (prefix + "%", limit),
+            ).fetchall()
+        return [_row_to_session(r) for r in rows]
+
     def update_session(
         self,
         session_id: str,
