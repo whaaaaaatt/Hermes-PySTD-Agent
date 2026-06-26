@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>HermesLite</title>
+  <link rel="stylesheet" href="sidepanel.css" />
+</head>
+<body>
+  <div id="app">
+    <aside id="sidebar">
+      <header class="brand">
+        <span class="logo">◐</span>
+        <span class="title">HermesLite</span>
+        <span class="version" id="version-badge"></span>
+      </header>
+
+      <div class="new-chat">
+        <button id="btn-new-session">+ New chat</button>
+      </div>
+
+
+      <nav class="nav">
+        <button class="nav-item active" data-view="chat">
+          <span class="ico">💬</span><span>Chat</span>
+        </button>
+        <button class="nav-item" data-view="tools">
+          <span class="ico">🔧</span><span>Tools <em id="count-tools">0</em></span>
+        </button>
+        <button class="nav-item" data-view="skills">
+          <span class="ico">📚</span><span>Skills <em id="count-skills">0</em></span>
+        </button>
+        <button class="nav-item" data-view="memory">
+          <span class="ico">🧠</span><span>Memory <em id="count-memory">0</em></span>
+        </button>
+        <button class="nav-item" data-view="config">
+          <span class="ico">⚙</span><span>Config</span>
+        </button>
+        <button class="nav-item" data-view="env">
+          <span class="ico">🌍</span><span>Environment</span>
+        </button>
+        <button class="nav-item" data-view="cron">
+          <span class="ico">⏰</span><span>Cron <em id="count-cron">0</em></span>
+        </button>
+      </nav>
+
+      <div class="sidebar-section">
+        <div class="section-title">Recent chats</div>
+        <ul id="session-list" class="list compact"></ul>
+      </div>
+    </aside>
+    <div id="sidebar-overlay"></div>
+
+    <main id="main">
+      <header id="topbar">
+        <button id="sidebar-toggle" title="Menu">☰</button>
+        <div class="profile-switcher">
+          <select id="profile-select" title="Agent profile"></select>
+          <button id="btn-new-profile" class="icon-btn" title="New profile">+</button>
+          <button id="btn-del-profile" class="icon-btn" title="Delete profile">×</button>
+        </div>
+        <div class="model-info">
+          <select id="provider-select" title="Provider"></select>
+          <input id="model-input" placeholder="model" />
+        </div>
+        <button id="btn-ext-refresh" class="icon-btn" title="Refresh">↻</button>
+        <button id="btn-ext-settings" class="icon-btn" title="Extension settings">⚙</button>
+        <button id="btn-popout" class="icon-btn" title="Pop out as window">⊞</button>
+        <button id="btn-theme" class="icon-btn" title="Toggle dark/light mode">☀</button>
+        <div class="usage" id="usage">0 tok</div>
+      </header>
+
+      <!-- ============== CHAT VIEW ============== -->
+      <section class="view active" data-view="chat">
+        <!-- empty-state is a SIBLING of #messages, not a child, so that
+             wiping #messages during a streaming turn doesn't accidentally
+             destroy the "no session selected" placeholder. -->
+        <div class="empty" id="empty-state">
+          <h2>Welcome to HermesLite</h2>
+          <p>Start a new chat, or pick one from the sidebar.</p>
+        </div>
+        <div id="messages" class="messages" aria-live="polite"></div>
+        <footer id="composer">
+          <div id="slash-menu" class="slash-menu" hidden></div>
+          <div id="attachment-preview" class="attachment-preview" hidden></div>
+          <textarea id="input" rows="3" placeholder="Ask HermesLite…  (Enter to send, Shift+Enter for newline, paste/drop images)"></textarea>
+          <div class="composer-actions">
+            <input type="file" id="file-input" accept="image/*,.txt,.py,.js,.json,.md,.csv,.html,.pdf" multiple hidden />
+            <button id="btn-attach" class="icon-btn" title="Attach file or image">📎</button>
+            <button id="btn-cancel" class="secondary" hidden>Cancel</button>
+            <button id="btn-send" class="primary">Send</button>
+          </div>
+        </footer>
+      </section>
+
+      <!-- ============== TOOLS VIEW ============== -->
+      <section class="view" data-view="tools">
+        <div class="view-split">
+          <aside class="pane-list">
+            <div class="pane-list-header">Tools <input id="tool-filter" placeholder="filter…" /></div>
+            <ul id="tool-list" class="list"></ul>
+          </aside>
+          <article class="pane-detail" id="tool-detail">
+            <div class="placeholder">Select a tool to see its schema and description.</div>
+          </article>
+        </div>
+      </section>
+
+      <!-- ============== SKILLS VIEW ============== -->
+      <section class="view" data-view="skills">
+        <div class="view-split">
+          <aside class="pane-list">
+            <div class="pane-list-header">Skills <input id="skill-filter" placeholder="filter…" /></div>
+            <ul id="skill-list" class="list"></ul>
+          </aside>
+          <article class="pane-detail" id="skill-detail">
+            <div class="placeholder">Select a skill to read its body.</div>
+          </article>
+        </div>
+      </section>
+
+      <!-- ============== MEMORY VIEW ============== -->
+      <section class="view" data-view="memory">
+        <div class="view-split">
+          <aside class="pane-list">
+            <div class="pane-list-header">
+              Memory <em id="count-memory-2">0</em>
+            </div>
+            <div class="memory-actions">
+              <input id="mem-key" placeholder="key" />
+              <input id="mem-value" placeholder="value" />
+              <button id="mem-save" class="primary">Save</button>
+            </div>
+            <ul id="memory-list" class="list"></ul>
+          </aside>
+          <article class="pane-detail" id="memory-detail">
+            <div class="placeholder">Select a memory entry to view its value and tags.</div>
+          </article>
+        </div>
+      </section>
+
+      <!-- ============== CONFIG VIEW ============== -->
+      <section class="view" data-view="config">
+        <div class="config-wrap">
+          <div class="pane-detail">
+            <div class="cwd-bar">
+              <label for="cwd-input">Working Directory</label>
+              <div class="cwd-row">
+                <input id="cwd-input" type="text" placeholder="e.g. ~/my-project" />
+                <button id="cwd-set" class="primary">Set</button>
+                <button id="cwd-refresh" class="secondary" title="Refresh">↻</button>
+                <span id="cwd-status" class="cwd-status"></span>
+              </div>
+            </div>
+            <h3>Config (config.json)</h3>
+            <div class="config-toolbar">
+              <button id="btn-config-tree" class="config-mode-btn active" title="Tree view">Tree</button>
+              <button id="btn-config-raw" class="config-mode-btn" title="Raw JSON">Raw</button>
+              <span id="config-status" class="config-status"></span>
+            </div>
+            <div id="config-view" class="config-view"></div>
+            <div id="config-raw-view" class="config-view" style="display:none"></div>
+            <div class="config-actions">
+              <button id="btn-config-save" class="primary">Save</button>
+              <button id="btn-config-reload" class="secondary">Reload</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============== ENVIRONMENT VIEW ============== -->
+      <section class="view" data-view="env">
+        <div class="env-wrap">
+          <div class="env-toolbar">
+            <input id="env-filter" type="text" placeholder="Search environment variables…" />
+            <button id="btn-env-add" class="primary">+ Add</button>
+          </div>
+          <div id="env-count" class="env-count"></div>
+          <table class="env-table">
+            <thead>
+              <tr>
+                <th>Value</th>
+                <th class="env-col-actions">Actions</th>
+              </tr>
+            </thead>
+            <tbody id="env-tbody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- ============== CRON VIEW ============== -->
+      <section class="view" data-view="cron">
+        <div class="view-split">
+          <aside class="pane-list">
+            <div class="pane-list-header">
+              Cron Jobs <em id="count-cron-2">0</em>
+            </div>
+            <div class="cron-actions">
+              <button id="btn-cron-new" class="primary">+ New Job</button>
+            </div>
+            <ul id="cron-list" class="list"></ul>
+          </aside>
+          <article class="pane-detail" id="cron-detail">
+            <div class="placeholder">Select a job to view its details, or create a new one.</div>
+          </article>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- ============== DEBUG PANEL ============== -->
+  <button id="debug-toggle" class="debug-toggle" title="LLM Debug" style="display:none">🔍</button>
+  <div id="debug-panel" class="debug-panel hidden">
+    <div class="debug-header">
+      <span class="debug-title">LLM Debug</span>
+      <div class="debug-actions">
+        <button id="debug-clear" class="debug-btn" title="Clear">🗑</button>
+        <button id="debug-close" class="debug-btn" title="Close">✕</button>
+      </div>
+    </div>
+    <div id="debug-filters" class="debug-filters">
+      <label><input type="checkbox" checked data-filter="llm_request" /> Request</label>
+      <label><input type="checkbox" checked data-filter="llm_response" /> Response</label>
+      <label><input type="checkbox" checked data-filter="tool_call" /> Tool</label>
+      <label><input type="checkbox" checked data-filter="tool_result" /> Result</label>
+      <label><input type="checkbox" checked data-filter="thinking_content" /> Thinking</label>
+      <label><input type="checkbox" checked data-filter="assistant_text_done" /> Text</label>
+    </div>
+    <div id="debug-log" class="debug-log"></div>
+  </div>
+
+  <script src="sidepanel.js"></script>
+</body>
+</html>

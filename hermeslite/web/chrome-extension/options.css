@@ -1,0 +1,38 @@
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font: 14px/1.5 system-ui, -apple-system, sans-serif;
+  background: #fbfaf7; color: #1f2937;
+  padding: 32px;
+}
+.container { max-width: 440px; }
+h1 { font-size: 20px; font-weight: 600; margin-bottom: 4px; }
+.subtitle { color: #6b7280; font-size: 13px; margin-bottom: 24px; }
+label { display: block; font-size: 12px; font-weight: 600; color: #4b5563; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
+.optional { font-weight: 400; text-transform: none; color: #9ca3af; }
+input {
+  width: 100%; padding: 8px 10px; font-size: 14px;
+  border: 1px solid #d6d2c6; border-radius: 6px;
+  background: #fff; color: #1f2937; outline: none;
+}
+input:focus { border-color: #b45309; }
+.hint { font-size: 11px; color: #9ca3af; margin: 4px 0 16px; }
+.actions { display: flex; gap: 8px; margin-top: 8px; }
+button {
+  padding: 8px 18px; border-radius: 8px; font-size: 13px;
+  font-weight: 500; cursor: pointer; font-family: inherit; border: 0;
+}
+button.primary { background: #b45309; color: #fffbf2; }
+button.primary:hover { background: #92400e; }
+button.secondary { background: transparent; color: #4b5563; border: 1px solid #d6d2c6; }
+button.secondary:hover { background: #f3f1ec; }
+.status { margin-top: 14px; font-size: 13px; min-height: 20px; }
+.status.ok { color: #166534; }
+.status.err { color: #b91c1c; }
+[data-theme="dark"] {
+  background: #11111b; color: #cdd6f4;
+}
+[data-theme="dark"] input { background: #1e1e30; border-color: #45475a; color: #cdd6f4; }
+[data-theme="dark"] .subtitle, [data-theme="dark"] .hint { color: #7f849c; }
+[data-theme="dark"] label { color: #a6adc8; }
+[data-theme="dark"] button.secondary { color: #a6adc8; border-color: #45475a; }
+[data-theme="dark"] button.secondary:hover { background: #1e1e2e; }

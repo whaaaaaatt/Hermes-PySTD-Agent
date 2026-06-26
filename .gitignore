@@ -1,0 +1,11 @@
+hermes-agent-ref/
+tests/
+AGENTS.md
+PLAN.md
+__pycache__/
+*.pyc
+*.pyo
+.env
+*.egg-info/
+dist/
+build/
