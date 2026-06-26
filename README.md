@@ -63,7 +63,7 @@
 <p align="center">⚠️ Only use this when you trust your network environment. Others should not have unrestricted access to your machine and ports.</p>
 
 ```bash
-./start-web.sh --host 0.0.0.0 --open
+./start-web.sh --host 0.0.0.0 --port 8000 --insecure
 ```
 
 &emsp;&emsp;Open your browser and start using the web interface. The web UI provides convenient access to tools, skills, memory, config, and environment variables. The chat interface offers expandable/collapsible display of system prompts, thinking, and tool calls. A side panel shows actual network requests for debugging and development.
