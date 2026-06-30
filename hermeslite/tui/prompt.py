@@ -21,6 +21,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -66,6 +67,8 @@ class Repl:
         self._prompt_template = prompt_template
         self._on_event = on_event or (lambda k, p: None)
         self._active_session_id: Optional[str] = None
+        self._active_agent: Optional[AIAgent] = None  # for Ctrl-C interrupt
+        self._output_lock = threading.Lock()           # serialise stdout from threads
         self._readline_ready = False
         self._last_ctrl_c: float = 0  # timestamp of last Ctrl-C
 
@@ -90,7 +93,12 @@ class Repl:
                     print()
                     break
                 self._last_ctrl_c = now
-                print(C.dim("  (press Ctrl-C again to exit)"))
+                # If an agent turn is running, interrupt it.
+                if self._active_agent is not None:
+                    self._active_agent.interrupt("Cancelled by user")
+                    print(C.yellow("\n  [interrupted — type a new message]"))
+                else:
+                    print(C.dim("  (press Ctrl-C again to exit)"))
                 continue
             line = line.rstrip()
             if not line:
@@ -815,57 +823,111 @@ class Repl:
     def _dispatch_turn(self, user_message: str) -> None:
         agent = self._make_agent(self._active_session_id)
         self._active_session_id = agent.session_id
+        self._active_agent = agent
         agent.on_event = self._on_event
         # Stream events to the terminal inline.
         _thinking_active = False  # track whether we're inside a thinking block
+        lock = self._output_lock
 
         def _end_thinking() -> None:
             nonlocal _thinking_active
             if _thinking_active:
-                sys.stdout.write("\n")
-                sys.stdout.flush()
+                with lock:
+                    sys.stdout.write("\n")
+                    sys.stdout.flush()
                 _thinking_active = False
 
         def event_sink(kind: str, payload: Dict[str, Any]) -> None:
             nonlocal _thinking_active
             if kind == "assistant_text_delta":
                 _end_thinking()
-                sys.stdout.write(payload.get("text", ""))
-                sys.stdout.flush()
+                with lock:
+                    sys.stdout.write(payload.get("text", ""))
+                    sys.stdout.flush()
             elif kind == "assistant_text_done":
                 _end_thinking()
                 if payload.get("text"):
-                    sys.stdout.write("\n")
-                    sys.stdout.flush()
+                    with lock:
+                        sys.stdout.write("\n")
+                        sys.stdout.flush()
                 self._on_event(kind, payload)
             elif kind == "thinking_content":
                 text = payload.get("text", "")
                 if text:
-                    if not _thinking_active:
-                        sys.stdout.write(C.dim("  \u2728 thinking...\n"))
+                    with lock:
+                        if not _thinking_active:
+                            sys.stdout.write(C.dim("  \u2728 thinking...\n"))
+                            sys.stdout.flush()
+                            _thinking_active = True
+                        sys.stdout.write(C.dim(text))
                         sys.stdout.flush()
-                        _thinking_active = True
-                    sys.stdout.write(C.dim(text))
-                    sys.stdout.flush()
             elif kind == "tool_call":
                 _end_thinking()
                 name = payload.get("name")
                 args = payload.get("args") or {}
-                print(C.gray(f"\n  \u2192 {name}({_short_repr(args)})"))
+                with lock:
+                    sys.stdout.write(C.gray(f"\n  \u2192 {name}({_short_repr(args)})\n"))
+                    sys.stdout.flush()
             elif kind == "tool_result":
                 _end_thinking()
                 ok = payload.get("ok")
                 marker = C.green("\u2713") if ok else C.red("\u2717")
                 data = payload.get("data")
-                preview = repr(data) if data is not None else ""
-                if len(preview) > 80:
-                    preview = preview[:80] + "\u2026"
-                print(C.gray(f"  {marker} {preview}"))
+                error = payload.get("error")
+                display = repr(data) if data is not None else ("ERROR: " + error if error else "")
+                if len(display) > 80:
+                    display = display[:80] + "\u2026"
+                with lock:
+                    sys.stdout.write(C.gray(f"  {marker} {display}\n"))
+                    sys.stdout.flush()
             else:
                 _end_thinking()
                 self._on_event(kind, payload)
         agent.on_event = event_sink
-        result = agent.run_turn(user_message)
+
+        # Run the agent in a daemon thread so the main thread stays
+        # responsive to Ctrl-C (KeyboardInterrupt).
+        turn_done = threading.Event()
+        result_holder: List = [None]
+        error_holder: List = [None]
+
+        def _run() -> None:
+            try:
+                result_holder[0] = agent.run_turn(user_message)
+            except BaseException as exc:
+                error_holder[0] = exc
+            finally:
+                turn_done.set()
+
+        t = threading.Thread(target=_run, daemon=True)
+        t.start()
+
+        # Main thread polls — short timeout allows timely KeyboardInterrupt.
+        try:
+            while not turn_done.is_set():
+                turn_done.wait(timeout=0.1)
+        except KeyboardInterrupt:
+            agent.interrupt("Cancelled by user")
+            # Wait for agent thread to finish (it will exit quickly after
+            # interrupt sets the event and closes the stream).
+            turn_done.wait(timeout=5.0)
+            print(C.yellow("\n  [interrupted — type a new message]"))
+            return
+        finally:
+            self._active_agent = None
+
+        # Re-raise agent-thread exceptions on the main thread.
+        exc = error_holder[0]
+        if exc is not None:
+            if isinstance(exc, KeyboardInterrupt):
+                print(C.yellow("\n  [interrupted]"))
+                return
+            raise exc
+
+        result = result_holder[0]
+        if result is None:
+            return
+
         # Auto-title from the first user message if the session is still
         # untitled — mirrors the web frontend's behaviour so that CLI
         # sessions show a meaningful name in the web UI session list.
@@ -897,7 +959,9 @@ class Repl:
                 ctx_info = f"{prompt_tok}/{max_ctx} [{style(bar)}] {pct}%"
             else:
                 ctx_info = f"{prompt_tok}↓ {comp_tok}↑ {total_tok} tok"
-            print(C.dim(f"  [{result.iterations} iter · {ctx_info}]"))
+            with lock:
+                sys.stdout.write(C.dim(f"  [{result.iterations} iter · {ctx_info}]\n"))
+                sys.stdout.flush()
 
     # ------------------------------------------------------------------
     # Welcome

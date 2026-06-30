@@ -616,7 +616,7 @@
     scrollToBottom();
   }
 
-  function appendToolResult(ok, data) {
+  function appendToolResult(ok, data, error) {
     const el = document.getElementById("messages");
     const details = document.createElement("details");
     details.className = "msg tool-result";
@@ -632,14 +632,13 @@
     summary.appendChild(label);
     const preview = document.createElement("span");
     preview.className = "tool-args-preview";
-    const text = String(data || "");
-    preview.textContent = text.length > 80 ? text.slice(0, 80) + "\u2026" : text;
+    const displayText = (data != null ? String(data) : "") || (error ? "ERROR: " + error : "");
+    preview.textContent = displayText.length > 80 ? displayText.slice(0, 80) + "\u2026" : displayText;
     summary.appendChild(preview);
     details.appendChild(summary);
     const body = document.createElement("div");
     body.className = "body";
-    // Show full content — server-side already persists results >100K to disk.
-    body.textContent = String(data || "");
+    body.textContent = displayText;
     details.appendChild(body);
     el.appendChild(details);
     scrollToBottom();
@@ -1002,7 +1001,7 @@
 
     } else if (evt.type === "tool_result") {
       _enterTool();
-      appendToolResult(evt.ok, evt.data);
+      appendToolResult(evt.ok, evt.data, evt.error);
 
     } else if (evt.type === "approval_request") {
       _showApprovalDialog(evt.approval_id, evt.command, evt.description);
@@ -1156,7 +1155,7 @@
         if (last) {
           const preview = last.querySelector(".sa-tool-preview");
           if (preview) {
-            const text = String(payload.data || "");
+            const text = (payload.data != null ? String(payload.data) : "") || (payload.error ? "ERROR: " + payload.error : "");
             preview.textContent = (payload.ok ? "\u2713 " : "\u2717 ") +
               (text.length > 50 ? text.slice(0, 50) + "\u2026" : text);
           }
@@ -2815,7 +2814,7 @@
     } else if (evt.type === "tool_call") {
       meta.textContent = evt.name || "";
     } else if (evt.type === "tool_result") {
-      meta.textContent = (evt.ok ? "ok" : "fail") + "  " + ((evt.data || "").slice(0, 60));
+      meta.textContent = (evt.ok ? "ok" : "fail") + "  " + ((evt.data != null ? String(evt.data) : "") || (evt.error ? "ERROR: " + evt.error : "") || "").slice(0, 60);
     }
     summary.appendChild(meta);
 

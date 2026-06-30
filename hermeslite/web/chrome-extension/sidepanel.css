@@ -670,6 +670,11 @@ body {
 
 @keyframes blink { 50% { opacity: 0; } }
 
+@keyframes cron-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.5); }
+  50% { box-shadow: 0 0 0 6px rgba(59, 130, 246, 0); }
+}
+
 /* ----------------------- Composer ----------------------- */
 
 #composer {
@@ -1342,7 +1347,7 @@ table.params code {
 .cron-status.paused    { background: #eab308; }
 .cron-status.error     { background: #ef4444; }
 .cron-status.completed { background: #6b7280; }
-.cron-status.running   { background: #3b82f6; animation: blink 1s steps(2) infinite; }
+.cron-status.running   { background: #3b82f6; animation: cron-pulse 1.5s ease-in-out infinite; }
 
 .cron-detail-meta {
   display: flex;
@@ -1360,6 +1365,12 @@ table.params code {
   flex-wrap: wrap;
 }
 
+.cron-detail-actions button.running {
+  opacity: 0.6;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
 .cron-output {
   background: var(--sidebar-bg);
   border: 1px solid var(--border);
@@ -1374,6 +1385,112 @@ table.params code {
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
   overscroll-behavior: contain;
+}
+
+.cron-run-history {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.cron-run-card {
+  background: var(--sidebar-bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.cron-run-card > summary {
+  padding: 10px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text2);
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+}
+
+.cron-run-card > summary::-webkit-details-marker { display: none; }
+
+.cron-run-card > summary::before {
+  content: "▸ ";
+  font-size: 11px;
+  color: var(--text3);
+}
+
+.cron-run-card[open] > summary::before {
+  content: "▾ ";
+}
+
+.cron-run-messages {
+  padding: 10px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 500px;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+}
+
+.cron-msg {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.cron-msg-role {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text3);
+}
+
+.cron-msg-user .cron-msg-role { color: var(--accent); }
+.cron-msg-assistant .cron-msg-role { color: #22c55e; }
+
+.cron-msg-body {
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text1);
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: var(--bg);
+  word-wrap: break-word;
+}
+
+.cron-msg-user .cron-msg-body {
+  border-left: 3px solid var(--accent);
+}
+
+.cron-msg-assistant .cron-msg-body {
+  border-left: 3px solid #22c55e;
+}
+
+.cron-msg-body pre {
+  background: var(--sidebar-bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 8px;
+  margin: 6px 0;
+  overflow-x: auto;
+  font-size: 12px;
+}
+
+.cron-msg-body code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  background: var(--sidebar-bg);
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+
+.cron-msg-body pre code {
+  background: none;
+  padding: 0;
 }
 
 .cron-form {

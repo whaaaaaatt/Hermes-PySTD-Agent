@@ -170,6 +170,12 @@
   // -----------------------------------------------------------------
   function switchView(name) {
     state.activeView = name;
+    // Stop cron polling when leaving cron view.
+    if (name !== "cron" && _cronPollTimer) {
+      clearInterval(_cronPollTimer);
+      _cronPollTimer = null;
+      _cronPollSeenRunning = false;
+    }
     document.querySelectorAll(".nav-item").forEach(b => {
       b.classList.toggle("active", b.dataset.view === name);
     });
@@ -222,14 +228,18 @@
   function renderSessions() {
     const list = document.getElementById("session-list");
     list.innerHTML = "";
-    if (!state.sessions.length) {
+    // Filter out internal sessions (cron runs, delegate subagents).
+    const visible = state.sessions.filter(s =>
+      !s.id.startsWith("cron_") && !s.id.startsWith("delegate-")
+    );
+    if (!visible.length) {
       const li = document.createElement("li");
       li.className = "empty-row";
       li.textContent = "(no chats yet)";
       list.appendChild(li);
       return;
     }
-    state.sessions.forEach(s => {
+    visible.forEach(s => {
       const li = document.createElement("li");
       if (s.id === state.activeSession) li.classList.add("active");
       const title = document.createElement("span");
@@ -606,7 +616,7 @@
     scrollToBottom();
   }
 
-  function appendToolResult(ok, data) {
+  function appendToolResult(ok, data, error) {
     const el = document.getElementById("messages");
     const details = document.createElement("details");
     details.className = "msg tool-result";
@@ -622,14 +632,13 @@
     summary.appendChild(label);
     const preview = document.createElement("span");
     preview.className = "tool-args-preview";
-    const text = String(data || "");
-    preview.textContent = text.length > 80 ? text.slice(0, 80) + "\u2026" : text;
+    const displayText = (data != null ? String(data) : "") || (error ? "ERROR: " + error : "");
+    preview.textContent = displayText.length > 80 ? displayText.slice(0, 80) + "\u2026" : displayText;
     summary.appendChild(preview);
     details.appendChild(summary);
     const body = document.createElement("div");
     body.className = "body";
-    // Show full content — server-side already persists results >100K to disk.
-    body.textContent = String(data || "");
+    body.textContent = displayText;
     details.appendChild(body);
     el.appendChild(details);
     scrollToBottom();
@@ -992,7 +1001,7 @@
 
     } else if (evt.type === "tool_result") {
       _enterTool();
-      appendToolResult(evt.ok, evt.data);
+      appendToolResult(evt.ok, evt.data, evt.error);
 
     } else if (evt.type === "approval_request") {
       _showApprovalDialog(evt.approval_id, evt.command, evt.description);
@@ -1146,7 +1155,7 @@
         if (last) {
           const preview = last.querySelector(".sa-tool-preview");
           if (preview) {
-            const text = String(payload.data || "");
+            const text = (payload.data != null ? String(payload.data) : "") || (payload.error ? "ERROR: " + payload.error : "");
             preview.textContent = (payload.ok ? "\u2713 " : "\u2717 ") +
               (text.length > 50 ? text.slice(0, 50) + "\u2026" : text);
           }
@@ -2014,6 +2023,51 @@
   // -----------------------------------------------------------------
   // Cron jobs
   // -----------------------------------------------------------------
+  let _cronPollTimer = null;
+  let _cronPollSeenRunning = false;
+  let _cronPollOrigLastRun = null;
+
+  function _pollCronUntilDone(jobId) {
+    if (_cronPollTimer) clearInterval(_cronPollTimer);
+    _cronPollSeenRunning = false;
+    const job = state.cronJobs.find(j => j.id === jobId);
+    _cronPollOrigLastRun = job?.last_run_at || null;
+
+    _cronPollTimer = setInterval(async () => {
+      try {
+        const data = await api("GET", "/api/cron");
+        const jobs = data.jobs || [];
+        state.cronJobs = jobs;
+        const job = jobs.find(j => j.id === jobId);
+        if (!job) { clearInterval(_cronPollTimer); _cronPollTimer = null; return; }
+
+        if (job.state === "running") {
+          _cronPollSeenRunning = true;
+          return; // still running, keep polling
+        }
+
+        // Job is no longer running.
+        if (_cronPollSeenRunning) {
+          // We saw it running before → it finished. Stop polling.
+          clearInterval(_cronPollTimer);
+          _cronPollTimer = null;
+          renderCronList();
+          selectCronJob(jobId);
+        } else if (job.last_run_at !== _cronPollOrigLastRun) {
+          // last_run_at changed without us seeing "running" (fast job or
+          // we missed the running state). Treat as done.
+          clearInterval(_cronPollTimer);
+          _cronPollTimer = null;
+          renderCronList();
+          selectCronJob(jobId);
+        }
+        // else: scheduler hasn't picked up the job yet, keep polling
+      } catch (_) {
+        // keep polling
+      }
+    }, 2000);
+  }
+
   async function loadCronJobs() {
     try {
       const data = await api("GET", "/api/cron");
@@ -2076,6 +2130,78 @@
     });
   }
 
+  function _loadCronRunHistory(jobId) {
+    const container = document.getElementById("cron-run-history");
+    if (!container) return;
+    api("GET", "/api/cron/" + jobId + "/sessions").then(data => {
+      const sessions = data.sessions || [];
+      if (!sessions.length) {
+        container.textContent = "(no runs yet)";
+        return;
+      }
+      container.innerHTML = "";
+      sessions.forEach(s => {
+        // Skip sessions with no displayable messages.
+        if (!s.messages || !s.messages.length) return;
+
+        const card = document.createElement("details");
+        card.className = "cron-run-card";
+
+        const summary = document.createElement("summary");
+        summary.className = "cron-run-header";
+        const timeStr = s.created_at
+          ? new Date(s.created_at * 1000).toLocaleString()
+          : s.id.split("_").pop();
+        summary.textContent = s.title || timeStr;
+        card.appendChild(summary);
+
+        const msgList = document.createElement("div");
+        msgList.className = "cron-run-messages";
+        s.messages.forEach(m => {
+          const content = (m.content || "").trim();
+          if (!content) return;
+          const bubble = document.createElement("div");
+          bubble.className = "cron-msg cron-msg-" + m.role;
+          const label = document.createElement("span");
+          label.className = "cron-msg-role";
+          label.textContent = m.role === "user" ? "Prompt" : "Response";
+          bubble.appendChild(label);
+          const body = document.createElement("div");
+          body.className = "cron-msg-body";
+          body.innerHTML = _renderCronMarkdown(content);
+          bubble.appendChild(body);
+          msgList.appendChild(bubble);
+        });
+        // Only append card if it has messages.
+        if (msgList.children.length > 0) {
+          card.appendChild(msgList);
+          container.appendChild(card);
+        }
+      });
+      if (!container.children.length) {
+        container.textContent = "(no runs yet)";
+      }
+    }).catch(() => {
+      container.textContent = "(failed to load run history)";
+    });
+  }
+
+  function _renderCronMarkdown(text) {
+    // Minimal markdown: code blocks, inline code, bold, links.
+    let s = escapeHTML(text);
+    // Fenced code blocks.
+    s = s.replace(/```(\w*)\n([\s\S]*?)```/g, '<pre><code>$2</code></pre>');
+    // Inline code.
+    s = s.replace(/`([^`]+)`/g, '<code>$1</code>');
+    // Bold.
+    s = s.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+    // Links.
+    s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+    // Newlines.
+    s = s.replace(/\n/g, '<br>');
+    return s;
+  }
+
   function selectCronJob(id) {
     state.activeCronJob = id;
     renderCronList();
@@ -2097,7 +2223,7 @@
         <span>Schedule: <code>${escapeHTML(schedDisplay)}</code></span>
       </div>
       <div class="cron-detail-actions">
-        <button id="cron-btn-run" class="primary">▶ Run Now</button>
+        <button id="cron-btn-run" class="primary${job.state === "running" ? " running" : ""}"${job.state === "running" ? " disabled" : ""}>${job.state === "running" ? "⏳ Running…" : "▶ Run Now"}</button>
         ${job.enabled && job.state !== "paused"
           ? '<button id="cron-btn-pause" class="secondary">⏸ Pause</button>'
           : '<button id="cron-btn-resume" class="secondary">▶ Resume</button>'}
@@ -2118,6 +2244,8 @@
       </div>
       <h3>Recent Output</h3>
       <div id="cron-output" class="cron-output">Loading…</div>
+      <h3>Run History</h3>
+      <div id="cron-run-history" class="cron-run-history">Loading…</div>
     `;
 
     // Load output.
@@ -2129,11 +2257,18 @@
       if (out) out.textContent = "(failed to load output)";
     });
 
+    // Load run history (sessions for this cron job).
+    _loadCronRunHistory(id);
+
     // Wire up action buttons.
     document.getElementById("cron-btn-run")?.addEventListener("click", async () => {
+      const btn = document.getElementById("cron-btn-run");
+      btn.textContent = "⏳ Running…";
+      btn.classList.add("running");
+      btn.disabled = true;
       await api("POST", "/api/cron/" + id + "/run");
-      await loadCronJobs();
-      selectCronJob(id);
+      // Poll until the job is no longer running, then refresh.
+      _pollCronUntilDone(id);
     });
     document.getElementById("cron-btn-pause")?.addEventListener("click", async () => {
       await api("POST", "/api/cron/" + id + "/pause");
@@ -2679,7 +2814,7 @@
     } else if (evt.type === "tool_call") {
       meta.textContent = evt.name || "";
     } else if (evt.type === "tool_result") {
-      meta.textContent = (evt.ok ? "ok" : "fail") + "  " + ((evt.data || "").slice(0, 60));
+      meta.textContent = (evt.ok ? "ok" : "fail") + "  " + ((evt.data != null ? String(evt.data) : "") || (evt.error ? "ERROR: " + evt.error : "") || "").slice(0, 60);
     }
     summary.appendChild(meta);
 

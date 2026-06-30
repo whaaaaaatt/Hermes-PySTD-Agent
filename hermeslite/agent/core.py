@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -152,6 +153,12 @@ class AIAgent:
         # llm_response SSE events so the frontend can display them.
         self.debug_enabled: bool = (cfg.get("debug") or {}).get("enabled", True)
 
+        # Interrupt support: another thread can call interrupt() to
+        # stop the current turn cleanly (close stream, break loop).
+        self._interrupt_event = threading.Event()
+        self._interrupt_message: str = ""
+        self._active_stream_body: Any = None  # StreamBody for mid-stream abort
+
         # Build the active tool list (respect enabled/disabled from cfg).
         tools_cfg = (cfg.get("tools") or {})
         self.tools: List[Tool] = registry.filter(
@@ -225,6 +232,10 @@ class AIAgent:
         ``user_message`` may be a plain string or a list of content parts
         (OpenAI multimodal format) for image/file attachments.
         """
+        # Clear any leftover interrupt state from a previous turn.
+        self._interrupt_event.clear()
+        self._interrupt_message = ""
+
         # Optional auto-compression before the turn starts.
         if self.compress_threshold > 0:
             if self._compress_skip_turns > 0:
@@ -286,11 +297,17 @@ class AIAgent:
         transient_retries = 0
         MAX_TRANSIENT_RETRIES = 3
         while iterations < self.max_iterations:
+            if self._interrupt_event.is_set():
+                break
             iterations += 1
             self._emit("iteration_start", {"n": iterations})
             try:
                 assistant_text, tool_calls, usage, reasoning_content = self._step(messages)
             except Exception as exc:  # noqa: BLE001
+                # If interrupted (e.g. StreamBody.close() from another
+                # thread), break out immediately — do not retry.
+                if self._interrupt_event.is_set():
+                    break
                 # Detect context-length errors (413 / context_length_exceeded)
                 # and trigger compression + retry once.
                 if context_retries < 1 and _is_context_length_error(exc):
@@ -365,8 +382,10 @@ class AIAgent:
 
             # Execute each tool call and append the result.
             for tc in tool_calls:
+                if self._interrupt_event.is_set():
+                    break
                 result = self._execute_tool_call(tc)
-                self._emit("tool_result", {"call_id": tc.get("id"), "ok": result.ok, "data": _truncate_for_log(result.data)})
+                self._emit("tool_result", {"call_id": tc.get("id"), "ok": result.ok, "data": _truncate_for_log(result.data), "error": result.error})
                 # Persist large tool results to disk (spillover).
                 from .compress import maybe_persist_tool_result
                 result_text = result.to_message()
@@ -390,6 +409,13 @@ class AIAgent:
                     tool_call_id=tc.get("id"),
                     name=(tc.get("function") or {}).get("name"),
                 ))
+
+        # Emit interrupt event if the turn was interrupted.
+        if self._interrupt_event.is_set():
+            self._emit("turn_interrupted", {
+                "message": self._interrupt_message or "Interrupted by user",
+                "partial_text": final_text or "",
+            })
 
         # Persist final assistant text.
         if final_text:
@@ -469,6 +495,9 @@ class AIAgent:
             stream=True, temperature=self.temperature, max_tokens=self.max_tokens,
             extra=self.extra,
         )
+        # Save StreamBody reference for interrupt() — allows closing the
+        # underlying HTTP socket from another thread.
+        self._active_stream_body = getattr(self.provider, '_last_stream_body', None)
         text_chunks: List[str] = []
         reasoning_chunks: List[str] = []
         # Index-keyed accumulator for streaming tool calls.
@@ -476,38 +505,43 @@ class AIAgent:
         usage: Dict[str, int] = {}
         finish_reason = ""
 
-        for delta in stream:
-            if delta.reasoning_content:
-                reasoning_chunks.append(delta.reasoning_content)
-                self._emit("thinking_content", {"text": delta.reasoning_content})
-            if delta.content:
-                text_chunks.append(delta.content)
-                self._emit("assistant_text_delta", {"text": delta.content})
-            for tc in delta.tool_calls_deltas or []:
-                idx = tc.get("index")
-                if idx is None:
-                    continue
-                cur = tool_accum.setdefault(idx, {
-                    "id": "", "type": "function",
-                    "function": {"name": "", "arguments": ""},
-                })
-                if tc.get("id"):
-                    cur["id"] = tc["id"]
-                if tc.get("type"):
-                    cur["type"] = tc["type"]
-                fn = tc.get("function") or {}
-                if fn.get("name"):
-                    cur["function"]["name"] = fn["name"]
-                # _parse_stream_chunk already accumulates arguments
-                # correctly (handles both incremental fragments and
-                # full-string-mode providers like Agnes). Just take
-                # the latest cumulative value — do NOT += it again.
-                if "arguments" in fn:
-                    cur["function"]["arguments"] = fn["arguments"]
-            if delta.finish_reason:
-                finish_reason = delta.finish_reason
-            if delta.usage:
-                usage = delta.usage
+        try:
+            for delta in stream:
+                if self._interrupt_event.is_set():
+                    break
+                if delta.reasoning_content:
+                    reasoning_chunks.append(delta.reasoning_content)
+                    self._emit("thinking_content", {"text": delta.reasoning_content})
+                if delta.content:
+                    text_chunks.append(delta.content)
+                    self._emit("assistant_text_delta", {"text": delta.content})
+                for tc in delta.tool_calls_deltas or []:
+                    idx = tc.get("index")
+                    if idx is None:
+                        continue
+                    cur = tool_accum.setdefault(idx, {
+                        "id": "", "type": "function",
+                        "function": {"name": "", "arguments": ""},
+                    })
+                    if tc.get("id"):
+                        cur["id"] = tc["id"]
+                    if tc.get("type"):
+                        cur["type"] = tc["type"]
+                    fn = tc.get("function") or {}
+                    if fn.get("name"):
+                        cur["function"]["name"] = fn["name"]
+                    # _parse_stream_chunk already accumulates arguments
+                    # correctly (handles both incremental fragments and
+                    # full-string-mode providers like Agnes). Just take
+                    # the latest cumulative value — do NOT += it again.
+                    if "arguments" in fn:
+                        cur["function"]["arguments"] = fn["arguments"]
+                if delta.finish_reason:
+                    finish_reason = delta.finish_reason
+                if delta.usage:
+                    usage = delta.usage
+        finally:
+            self._active_stream_body = None
 
         text = "".join(text_chunks)
         reasoning_content = "".join(reasoning_chunks) if reasoning_chunks else ""
@@ -585,6 +619,29 @@ class AIAgent:
         except Exception:  # noqa: BLE001
             # A buggy callback must never break the agent loop.
             logger.exception("agent: on_event(%s) raised", kind)
+
+    # ------------------------------------------------------------------
+    # Interrupt
+    # ------------------------------------------------------------------
+
+    def interrupt(self, message: str = "") -> None:
+        """Interrupt the current turn. Thread-safe.
+
+        Sets the interrupt flag, closes any active HTTP stream to abort
+        in-flight reads, and stores the message for the caller.
+        """
+        self._interrupt_message = message
+        self._interrupt_event.set()
+        body = self._active_stream_body
+        if body is not None:
+            try:
+                body.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def is_interrupted(self) -> bool:
+        """Return True if interrupt() was called."""
+        return self._interrupt_event.is_set()
 
 
 # ---------------------------------------------------------------------------

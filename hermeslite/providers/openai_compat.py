@@ -385,6 +385,9 @@ class OpenAICompatProvider:
         # ``StreamDelta.tool_calls_deltas`` (one entry per index).
         tool_accum: Dict[int, Dict[str, Any]] = {}
 
+        # Save StreamBody reference so the agent can close() it for
+        # mid-stream interrupt (called from another thread).
+        self._last_stream_body = stream
         try:
             for event in parse_sse(stream):
                 if event["event"] != "message" or not event["data"]:
@@ -402,6 +405,7 @@ class OpenAICompatProvider:
                 if delta is not None:
                     yield delta
         finally:
+            self._last_stream_body = None
             stream.close()
 
     def _parse_stream_chunk(
