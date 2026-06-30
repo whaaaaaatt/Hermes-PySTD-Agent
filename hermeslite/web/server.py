@@ -100,6 +100,11 @@ class ServerState:
         # (each session has at most one in-flight turn).
         self._turn_locks: Dict[str, threading.Lock] = {}
         self._turn_locks_guard = threading.Lock()
+        # Active agent references — keyed by session id.  Used by the
+        # cancel endpoint to call agent.interrupt() and truly stop the
+        # LLM loop when the user clicks Cancel.
+        self._active_agents: Dict[str, Any] = {}
+        self._active_agents_guard = threading.Lock()
         # Cron scheduler — started lazily when the first job is added.
         self._cron_scheduler: Optional[CronScheduler] = None
         self._cron_scheduler_lock = threading.Lock()
@@ -442,17 +447,21 @@ def _build_router(state: ServerState) -> Router:
                         "type": "image_url",
                         "image_url": {"url": data_url},
                     })
-            return SSEResponse(_stream_one_turn(agent, content_parts))
-        return SSEResponse(_stream_one_turn(agent, text))
+            return SSEResponse(_stream_one_turn(agent, content_parts, session_id=kw["sid"]))
+        return SSEResponse(_stream_one_turn(agent, text, session_id=kw["sid"]))
 
     @r.route("POST", r"/api/sessions/(?P<sid>[A-Za-z0-9_]+)/cancel")
     def cancel_session(handler, body, kw):
         _check_auth(handler)
-        # Best-effort: there's no clean way to abort a urllib request
-        # mid-flight, but we can mark the session as "cancelled" so
-        # the next request resets the lock.
+        sid = kw["sid"]
+        # Interrupt the active agent if one is running for this session.
+        with state._active_agents_guard:
+            agent = state._active_agents.get(sid)
+        if agent is not None:
+            agent.interrupt("Cancelled by user")
+        # Also clean up any stale turn lock.
         with state._turn_locks_guard:
-            state._turn_locks.pop(kw["sid"], None)
+            state._turn_locks.pop(sid, None)
         return {"ok": True}
 
     @r.route("GET", r"/api/sessions/(?P<sid>[A-Za-z0-9_]+)/usage")
@@ -1202,7 +1211,7 @@ def _sse_single(payload: dict) -> Generator[str, None, None]:
     yield json.dumps(payload, ensure_ascii=False)
 
 
-def _stream_one_turn(agent: AIAgent, user_message) -> Generator[str, None, None]:
+def _stream_one_turn(agent: AIAgent, user_message, session_id: str = "") -> Generator[str, None, None]:
     """Drive one agent turn and yield SSE-formatted JSON lines.
 
     ``user_message`` may be a plain string or a list of content parts
@@ -1258,32 +1267,43 @@ def _stream_one_turn(agent: AIAgent, user_message) -> Generator[str, None, None]
 
     threading.Thread(target=runner, daemon=True).start()
 
-    # Yield events as they arrive. We don't honour per-request
-    # cancellation here — the client can simply stop reading and the
-    # underlying TCP close will tear the agent thread down.
-    while True:
-        try:
-            evt = q.get(timeout=15.0)
-        except queue.Empty:
-            # Keep-alive comment to defeat proxy timeouts. The router
-            # wraps each payload as `data: ...\n\n`, but comments
-            # start with `:` and need their own format. We send a
-            # literal "ping" data line.
-            yield json.dumps({"type": "ping"})
-            continue
-        yield evt
-        try:
-            parsed = json.loads(evt)
-        except json.JSONDecodeError:
-            parsed = {}
-        if parsed.get("type") in ("done", "error"):
-            break
-        if done.is_set() and q.empty():
-            break
-    if error_holder:
-        # Re-raise on caller so the framework can log it. We yield a
-        # final error frame first.
-        logger.error("stream_one_turn: %s", error_holder[0])
+    # Register active agent so the cancel endpoint can interrupt it.
+    if session_id:
+        with state._active_agents_guard:
+            state._active_agents[session_id] = agent
+    try:
+        # Yield events as they arrive. The client can stop reading and
+        # the underlying TCP close will tear the agent thread down, but
+        # the cancel endpoint can also call agent.interrupt() to stop
+        # the LLM loop cleanly.
+        while True:
+            try:
+                evt = q.get(timeout=15.0)
+            except queue.Empty:
+                # Keep-alive comment to defeat proxy timeouts. The router
+                # wraps each payload as `data: ...\n\n`, but comments
+                # start with `:` and need their own format. We send a
+                # literal "ping" data line.
+                yield json.dumps({"type": "ping"})
+                continue
+            yield evt
+            try:
+                parsed = json.loads(evt)
+            except json.JSONDecodeError:
+                parsed = {}
+            if parsed.get("type") in ("done", "error"):
+                break
+            if done.is_set() and q.empty():
+                break
+        if error_holder:
+            # Re-raise on caller so the framework can log it. We yield a
+            # final error frame first.
+            logger.error("stream_one_turn: %s", error_holder[0])
+    finally:
+        # Unregister active agent.
+        if session_id:
+            with state._active_agents_guard:
+                state._active_agents.pop(session_id, None)
 
 
 # ---------------------------------------------------------------------------

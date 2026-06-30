@@ -655,6 +655,10 @@
   document.getElementById("btn-send").addEventListener("click", send);
   document.getElementById("btn-cancel").addEventListener("click", () => {
     if (state.inFlight) state.inFlight.abort();
+    // Also tell the backend to interrupt the agent so it stops the LLM loop.
+    if (state.activeSession) {
+      fetch(url("/api/sessions/" + state.activeSession + "/cancel"), {method: "POST"}).catch(() => {});
+    }
   });
   document.getElementById("input").addEventListener("keydown", (ev) => {
     if (ev.key === "Enter" && !ev.shiftKey) {
