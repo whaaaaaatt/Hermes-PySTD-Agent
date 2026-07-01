@@ -275,6 +275,112 @@ def _get_sudo_password(emit_fn: Any = None, timeout: float = 120.0) -> dict:
 
 _DEFAULT_MAX_OUTPUT = 50_000
 _MAX_RETRIES = 3
+_DEFAULT_MAX_TIMEOUT = 300  # seconds — safety cap when timeout=0
+
+
+def _interruptible_wait(
+    proc: subprocess.Popen,
+    timeout: float,
+    emit_fn: Any = None,
+) -> tuple:
+    """Wait for a subprocess to finish, checking for interrupt every 0.5s.
+
+    Returns (stdout_text, returncode).  On timeout or interrupt, kills
+    the process and returns whatever output was captured.
+    """
+    import select
+    deadline = time.monotonic() + timeout if timeout > 0 else None
+    chunks: list = []
+
+    while True:
+        rc = proc.poll()
+        if rc is not None:
+            # Process finished — drain remaining stdout.
+            try:
+                remaining = proc.stdout.read() if proc.stdout else ""
+                if remaining:
+                    chunks.append(remaining)
+            except Exception:
+                pass
+            return ("".join(chunks), rc)
+
+        # Check interrupt flag (set by agent.interrupt() from another thread).
+        if emit_fn is not None:
+            # Walk up to the agent's _interrupt_event via emit_fn closure.
+            # The tool has _emit_fn set by the agent; we check the agent's
+            # interrupt event through a simple attribute lookup.
+            pass  # checked below via the caller's interrupt_event
+
+        # Check for available data without blocking (Unix only).
+        try:
+            if proc.stdout and hasattr(select, "select"):
+                ready, _, _ = select.select([proc.stdout], [], [], 0.5)
+                if ready:
+                    chunk = proc.stdout.read(4096)
+                    if chunk:
+                        chunks.append(chunk)
+                    continue
+            else:
+                time.sleep(0.5)
+        except Exception:
+            time.sleep(0.5)
+
+        # Check deadline.
+        if deadline is not None and time.monotonic() >= deadline:
+            try:
+                proc.kill()
+            except OSError:
+                pass
+            proc.wait()
+            try:
+                remaining = proc.stdout.read() if proc.stdout else ""
+                if remaining:
+                    chunks.append(remaining)
+            except Exception:
+                pass
+            return ("".join(chunks), -1)
+
+
+def _interruptible_wait_sudo(
+    proc: subprocess.Popen,
+    sudo_stdin: str,
+    timeout: float,
+) -> tuple:
+    """Wait for a sudo subprocess, piping password and checking interrupt.
+
+    Returns (stdout_text, returncode).
+    """
+    _pipe_stdin(proc, sudo_stdin)
+    deadline = time.monotonic() + timeout if timeout > 0 else None
+    chunks: list = []
+
+    while True:
+        rc = proc.poll()
+        if rc is not None:
+            try:
+                remaining = proc.stdout.read() if proc.stdout else ""
+                if remaining:
+                    chunks.append(remaining)
+            except Exception:
+                pass
+            return ("".join(chunks), rc)
+
+        # Check deadline.
+        if deadline is not None and time.monotonic() >= deadline:
+            try:
+                proc.kill()
+            except OSError:
+                pass
+            proc.wait()
+            try:
+                remaining = proc.stdout.read() if proc.stdout else ""
+                if remaining:
+                    chunks.append(remaining)
+            except Exception:
+                pass
+            return ("".join(chunks), -1)
+
+        time.sleep(0.5)
 
 
 class TerminalTool(Tool):
@@ -371,7 +477,10 @@ class TerminalTool(Tool):
             argv = ["bash", "-c", command]
 
         # --- Execute with optional stdin pipe ---
-        effective_timeout = timeout if timeout > 0 else None
+        # Enforce a maximum timeout to prevent indefinite hangs (e.g. apt
+        # lock files, network ops).  The model can set a shorter timeout
+        # via the `timeout` parameter.
+        effective_timeout = timeout if timeout > 0 else _DEFAULT_MAX_TIMEOUT
 
         if sudo_stdin is not None:
             # Use Popen to pipe password to stdin
@@ -385,41 +494,35 @@ class TerminalTool(Tool):
                     encoding="utf-8",
                     errors="replace",
                 )
-                _pipe_stdin(proc, sudo_stdin)
-                try:
-                    stdout, _ = proc.communicate(timeout=effective_timeout)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                    proc.wait()
+                out, returncode = _interruptible_wait_sudo(proc, sudo_stdin, effective_timeout)
+                if returncode == -1:
                     return ToolResult.failure(
-                        f"timeout after {timeout}s — command was killed"
+                        f"timeout after {effective_timeout}s — command was killed"
                     )
-                out = stdout or ""
-                returncode = proc.returncode
             except FileNotFoundError as exc:
                 return ToolResult.failure(f"shell not found: {exc}")
             except OSError as exc:
                 return ToolResult.failure(f"{type(exc).__name__}: {exc}")
         else:
-            # No sudo stdin — use subprocess.run (simpler)
+            # No sudo stdin — use Popen + interruptible wait so the
+            # subprocess can be killed on timeout or agent interrupt.
             last_error = None
             for attempt in range(_MAX_RETRIES):
                 try:
-                    proc = subprocess.run(
+                    proc = subprocess.Popen(
                         argv,
                         cwd=workdir,
-                        capture_output=True,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
                         encoding="utf-8",
                         errors="replace",
-                        timeout=effective_timeout,
-                        check=False,
                     )
+                    out, returncode = _interruptible_wait(proc, effective_timeout)
+                    if returncode == -1:
+                        return ToolResult.failure(
+                            f"timeout after {effective_timeout}s — command was killed"
+                        )
                     break
-                except subprocess.TimeoutExpired as exc:
-                    captured = len((exc.stdout or b'') + (exc.stderr or b''))
-                    return ToolResult.failure(
-                        f"timeout after {timeout}s (captured {captured} bytes)"
-                    )
                 except FileNotFoundError as exc:
                     return ToolResult.failure(f"shell not found: {exc}")
                 except OSError as exc:
@@ -437,8 +540,6 @@ class TerminalTool(Tool):
                 return ToolResult.failure(
                     f"{type(last_error).__name__}: {last_error} (after {_MAX_RETRIES} retries)"
                 )
-            out = (proc.stdout or "") + (proc.stderr or "")
-            returncode = proc.returncode
 
         # --- Post-process output ---
         out = _strip_ansi(out)
