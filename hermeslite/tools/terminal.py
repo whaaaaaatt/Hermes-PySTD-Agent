@@ -281,13 +281,19 @@ _DEFAULT_MAX_TIMEOUT = 300  # seconds — safety cap when timeout=0
 def _kill_proc_tree(proc: subprocess.Popen) -> None:
     """Kill a process and all its children (process group)."""
     import signal
+    logger.debug("terminal: killing process tree for pid %d", proc.pid)
     try:
-        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-    except (OSError, ProcessLookupError):
+        pgid = os.getpgid(proc.pid)
+        logger.debug("terminal: sending SIGKILL to process group %d", pgid)
+        os.killpg(pgid, signal.SIGKILL)
+        logger.debug("terminal: SIGKILL sent to process group %d", pgid)
+    except (OSError, ProcessLookupError) as exc:
+        logger.debug("terminal: killpg failed (%s), falling back to proc.kill()", exc)
         try:
             proc.kill()
-        except (OSError, ProcessLookupError):
-            pass
+            logger.debug("terminal: proc.kill() sent to pid %d", proc.pid)
+        except (OSError, ProcessLookupError) as exc2:
+            logger.debug("terminal: proc.kill() also failed: %s", exc2)
 
 
 def _interruptible_wait(
@@ -306,10 +312,17 @@ def _interruptible_wait(
     import select
     deadline = time.monotonic() + timeout if timeout > 0 else None
     chunks: list = []
+    start = time.monotonic()
+    logger.debug(
+        "terminal: _interruptible_wait start — pid=%s timeout=%.1fs deadline=%s interrupt_event=%s",
+        proc.pid, timeout, deadline, interrupt_event is not None,
+    )
 
     while True:
         rc = proc.poll()
+        elapsed = time.monotonic() - start
         if rc is not None:
+            logger.debug("terminal: process %d exited with rc=%s after %.1fs", proc.pid, rc, elapsed)
             try:
                 remaining = proc.stdout.read() if proc.stdout else ""
                 if remaining:
@@ -320,6 +333,7 @@ def _interruptible_wait(
 
         # Check interrupt flag.
         if interrupt_event is not None and interrupt_event.is_set():
+            logger.debug("terminal: interrupt_event is set after %.1fs — killing pid %d", elapsed, proc.pid)
             _kill_proc_tree(proc)
             proc.wait()
             try:
@@ -328,6 +342,7 @@ def _interruptible_wait(
                     chunks.append(remaining)
             except Exception:
                 pass
+            logger.debug("terminal: interrupted — returning after %.1fs", elapsed)
             return ("".join(chunks), -1)
 
         # Non-blocking read (Unix).
@@ -341,11 +356,16 @@ def _interruptible_wait(
                     continue
             else:
                 time.sleep(0.5)
-        except Exception:
+        except Exception as exc:
+            logger.debug("terminal: select/read exception: %s", exc)
             time.sleep(0.5)
 
         # Check deadline.
         if deadline is not None and time.monotonic() >= deadline:
+            logger.debug(
+                "terminal: TIMEOUT after %.1fs (deadline=%.1f now=%.1f) — killing pid %d",
+                elapsed, deadline, time.monotonic(), proc.pid,
+            )
             _kill_proc_tree(proc)
             proc.wait()
             try:
@@ -354,7 +374,16 @@ def _interruptible_wait(
                     chunks.append(remaining)
             except Exception:
                 pass
+            logger.debug("terminal: timeout kill complete — returning after %.1fs", elapsed)
             return ("".join(chunks), -1)
+
+        # Periodic debug log every 10s.
+        if int(elapsed) % 10 == 0 and int(elapsed) > 0 and int(elapsed * 10) % 10 == 0:
+            remaining = "N/A" if deadline is None else f"{deadline - time.monotonic():.1f}s left"
+            logger.debug(
+                "terminal: still running pid=%d elapsed=%.1fs %s chunks=%d",
+                proc.pid, elapsed, remaining, len(chunks),
+            )
 
 
 def _interruptible_wait_sudo(
@@ -370,10 +399,17 @@ def _interruptible_wait_sudo(
     _pipe_stdin(proc, sudo_stdin)
     deadline = time.monotonic() + timeout if timeout > 0 else None
     chunks: list = []
+    start = time.monotonic()
+    logger.debug(
+        "terminal: _interruptible_wait_sudo start — pid=%s timeout=%.1fs",
+        proc.pid, timeout,
+    )
 
     while True:
         rc = proc.poll()
+        elapsed = time.monotonic() - start
         if rc is not None:
+            logger.debug("terminal: sudo process %d exited rc=%s after %.1fs", proc.pid, rc, elapsed)
             try:
                 remaining = proc.stdout.read() if proc.stdout else ""
                 if remaining:
@@ -384,6 +420,7 @@ def _interruptible_wait_sudo(
 
         # Check interrupt flag.
         if interrupt_event is not None and interrupt_event.is_set():
+            logger.debug("terminal: interrupt set during sudo — killing pid %d after %.1fs", proc.pid, elapsed)
             _kill_proc_tree(proc)
             proc.wait()
             try:
@@ -396,6 +433,7 @@ def _interruptible_wait_sudo(
 
         # Check deadline.
         if deadline is not None and time.monotonic() >= deadline:
+            logger.debug("terminal: TIMEOUT sudo pid %d after %.1fs — killing", proc.pid, elapsed)
             _kill_proc_tree(proc)
             proc.wait()
             try:
@@ -507,6 +545,10 @@ class TerminalTool(Tool):
         # lock files, network ops).  The model can set a shorter timeout
         # via the `timeout` parameter.
         effective_timeout = timeout if timeout > 0 else _DEFAULT_MAX_TIMEOUT
+        logger.debug(
+            "terminal: effective_timeout=%s (model_timeout=%s, default_max=%s) command=%r",
+            effective_timeout, timeout, _DEFAULT_MAX_TIMEOUT, command[:120],
+        )
 
         if sudo_stdin is not None:
             # Use Popen to pipe password to stdin
@@ -521,6 +563,7 @@ class TerminalTool(Tool):
                     errors="replace",
                     start_new_session=True,
                 )
+                logger.debug("terminal: sudo Popen pid=%d argv=%s", proc.pid, argv[:3])
                 out, returncode = _interruptible_wait_sudo(
                     proc, sudo_stdin, effective_timeout,
                     interrupt_event=getattr(self, '_interrupt_event', None),
@@ -548,6 +591,7 @@ class TerminalTool(Tool):
                         errors="replace",
                         start_new_session=True,
                     )
+                    logger.debug("terminal: Popen pid=%d argv=%s", proc.pid, argv[:3])
                     out, returncode = _interruptible_wait(
                         proc, effective_timeout,
                         interrupt_event=getattr(self, '_interrupt_event', None),
