@@ -116,6 +116,17 @@ def post_json_stream(
                 logger.debug("post_json_stream: %s on attempt %d, retrying", e.code, attempt + 1)
                 _sleep_backoff(attempt)
                 continue
+            # Log request payload for non-transient errors (e.g. 400)
+            if e.code >= 400:
+                try:
+                    req_body = data.decode("utf-8", errors="replace")
+                    logger.error(
+                        "HTTP %d from %s — request payload (%d bytes):\n%s",
+                        e.code, url, len(data),
+                        req_body[:10000] + ("..." if len(req_body) > 10000 else ""),
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.error("HTTP %d from %s (could not log request body)", e.code, url)
             raise HTTPError(e.code, text, url) from e
         except (urllib.error.URLError, socket.timeout, ConnectionError) as e:
             last_exc = e
@@ -212,6 +223,18 @@ def _send_with_retry(
                 last_exc = HTTPError(e.code, text, req.full_url)
                 _sleep_backoff(attempt)
                 continue
+            # Log request payload for non-transient errors (e.g. 400)
+            # to help debug malformed requests sent to the API.
+            if e.code >= 400:
+                try:
+                    req_body = (req.data or b"").decode("utf-8", errors="replace")
+                    logger.error(
+                        "HTTP %d from %s — request payload (%d bytes):\n%s",
+                        e.code, req.full_url, len(req.data or b""),
+                        req_body[:10000] + ("..." if len(req_body) > 10000 else ""),
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.error("HTTP %d from %s (could not log request body)", e.code, req.full_url)
             raise HTTPError(e.code, text, req.full_url) from e
         except (urllib.error.URLError, socket.timeout, ConnectionError) as e:
             last_exc = e
