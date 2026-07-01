@@ -447,8 +447,8 @@ def _build_router(state: ServerState) -> Router:
                         "type": "image_url",
                         "image_url": {"url": data_url},
                     })
-            return SSEResponse(_stream_one_turn(agent, content_parts, session_id=kw["sid"]))
-        return SSEResponse(_stream_one_turn(agent, text, session_id=kw["sid"]))
+            return SSEResponse(_stream_one_turn(agent, content_parts, session_id=kw["sid"], server_state=state))
+        return SSEResponse(_stream_one_turn(agent, text, session_id=kw["sid"], server_state=state))
 
     @r.route("POST", r"/api/sessions/(?P<sid>[A-Za-z0-9_]+)/cancel")
     def cancel_session(handler, body, kw):
@@ -1211,7 +1211,7 @@ def _sse_single(payload: dict) -> Generator[str, None, None]:
     yield json.dumps(payload, ensure_ascii=False)
 
 
-def _stream_one_turn(agent: AIAgent, user_message, session_id: str = "") -> Generator[str, None, None]:
+def _stream_one_turn(agent: AIAgent, user_message, session_id: str = "", server_state: "ServerState | None" = None) -> Generator[str, None, None]:
     """Drive one agent turn and yield SSE-formatted JSON lines.
 
     ``user_message`` may be a plain string or a list of content parts
@@ -1268,9 +1268,9 @@ def _stream_one_turn(agent: AIAgent, user_message, session_id: str = "") -> Gene
     threading.Thread(target=runner, daemon=True).start()
 
     # Register active agent so the cancel endpoint can interrupt it.
-    if session_id:
-        with state._active_agents_guard:
-            state._active_agents[session_id] = agent
+    if session_id and server_state is not None:
+        with server_state._active_agents_guard:
+            server_state._active_agents[session_id] = agent
     try:
         # Yield events as they arrive. The client can stop reading and
         # the underlying TCP close will tear the agent thread down, but
@@ -1301,9 +1301,9 @@ def _stream_one_turn(agent: AIAgent, user_message, session_id: str = "") -> Gene
             logger.error("stream_one_turn: %s", error_holder[0])
     finally:
         # Unregister active agent.
-        if session_id:
-            with state._active_agents_guard:
-                state._active_agents.pop(session_id, None)
+        if session_id and server_state is not None:
+            with server_state._active_agents_guard:
+                server_state._active_agents.pop(session_id, None)
 
 
 # ---------------------------------------------------------------------------
