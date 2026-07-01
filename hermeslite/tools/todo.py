@@ -1,151 +1,194 @@
-"""Todo / task list tool (in-memory only — the list is per-process).
+"""Todo / task list tool — aligned with hermes-agent-ref.
 
-Persisting todos across processes is out of scope; the agent uses this
-for short-lived planning within a single session.
+Single ``todo`` tool with read/write modes:
+  - Omit ``todos`` → read current list
+  - Provide ``todos`` array → write (replace or merge)
 
-Design notes (aligned with hermes-agent-ref):
-
-- Every mutation (add / update / remove) returns the **full list** plus
-  summary counts so the model always knows the current state.
-- Only ONE item should be ``in_progress`` at a time — finish it before
-  starting the next.
-- After planning, **execute immediately** — do not loop on todo updates.
+State is per-agent (stored on ``AIAgent._todo_store``).  The global
+``_store`` singleton is only a fallback for tool tests.
 """
 from __future__ import annotations
 
+import json
 import logging
 import threading
-import uuid
 from typing import Any, Dict, List, Optional
 
 from .registry import Tool, ToolResult, registry
 
 logger = logging.getLogger(__name__)
 
-
-def _format_list(items: List[Dict[str, Any]]) -> str:
-    """Format the full todo list with summary counts."""
-    if not items:
-        return "(no todos)\n\nSummary: 0 total, 0 pending, 0 in_progress, 0 done"
-    lines = []
-    for i in items:
-        tag = {"pending": "[ ]", "in_progress": "[>]", "done": "[x]"}.get(i["status"], "[ ]")
-        lines.append(f"{tag} #{i['id']}: {i['content']}")
-    counts = {"pending": 0, "in_progress": 0, "done": 0}
-    for i in items:
-        counts[i["status"]] = counts.get(i["status"], 0) + 1
-    summary = f"Summary: {len(items)} total, {counts['pending']} pending, {counts['in_progress']} in_progress, {counts['done']} done"
-    return "\n".join(lines) + "\n\n" + summary
+_VALID_STATUSES = frozenset({"pending", "in_progress", "completed", "cancelled"})
 
 
-class _TodoStore:
+class TodoStore:
+    """Ordered in-memory todo list.  Position = priority."""
+
     def __init__(self) -> None:
-        self._items: Dict[str, Dict[str, Any]] = {}
+        self._items: List[Dict[str, str]] = []
         self._lock = threading.Lock()
 
-    def add(self, content: str) -> str:
-        tid = uuid.uuid4().hex[:8]
+    def write(self, todos: List[Dict[str, str]], merge: bool = False) -> List[Dict[str, str]]:
+        """Write the todo list.
+
+        ``merge=False`` (default): replace the entire list.
+        ``merge=True``: update existing items by id, append new ones.
+        """
         with self._lock:
-            self._items[tid] = {"id": tid, "content": content, "status": "pending"}
-        return tid
+            if not merge:
+                self._items = [self._normalise(t) for t in todos]
+            else:
+                by_id = {i["id"]: i for i in self._items}
+                for t in todos:
+                    item = self._normalise(t)
+                    existing = by_id.get(item["id"])
+                    if existing:
+                        existing["content"] = item["content"]
+                        existing["status"] = item["status"]
+                    else:
+                        self._items.append(item)
+                        by_id[item["id"]] = item
+        return self.read()
 
-    def update(self, tid: str, status: str) -> bool:
-        if status not in ("pending", "in_progress", "done"):
-            return False
+    def read(self) -> List[Dict[str, str]]:
         with self._lock:
-            item = self._items.get(tid)
-            if not item:
-                return False
-            item["status"] = status
-            return True
+            return [dict(i) for i in self._items]
 
-    def remove(self, tid: str) -> bool:
+    def has_items(self) -> bool:
         with self._lock:
-            return self._items.pop(tid, None) is not None
+            return bool(self._items)
 
-    def list(self) -> List[Dict[str, Any]]:
+    def format_for_injection(self) -> Optional[str]:
+        """Return a user-message string to re-inject active todos after
+        context compression.  Only includes pending / in_progress items."""
         with self._lock:
-            return list(self._items.values())
+            active = [i for i in self._items if i["status"] in ("pending", "in_progress")]
+        if not active:
+            return None
+        lines = ["[Your active task list was preserved across context compression]"]
+        for i in active:
+            tag = "[>]" if i["status"] == "in_progress" else "[ ]"
+            lines.append(f"  {tag} {i['id']}: {i['content']}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _normalise(t: Dict[str, Any]) -> Dict[str, str]:
+        status = t.get("status", "pending")
+        if status not in _VALID_STATUSES:
+            status = "pending"
+        return {
+            "id": str(t.get("id", "")),
+            "content": str(t.get("content", "")),
+            "status": status,
+        }
 
 
-_store = _TodoStore()
+def _format_result(items: List[Dict[str, str]]) -> str:
+    """Format the full list + summary as JSON (matches ref output shape)."""
+    counts: Dict[str, int] = {}
+    for i in items:
+        s = i["status"]
+        counts[s] = counts.get(s, 0) + 1
+    return json.dumps({
+        "todos": items,
+        "summary": {
+            "total": len(items),
+            "pending": counts.get("pending", 0),
+            "in_progress": counts.get("in_progress", 0),
+            "completed": counts.get("completed", 0),
+            "cancelled": counts.get("cancelled", 0),
+        },
+    }, ensure_ascii=False, indent=2)
 
 
-class TodoAddTool(Tool):
-    name = "todo_add"
+# Module-level default store (used when the agent doesn't inject one).
+_default_store = TodoStore()
+
+
+class TodoTool(Tool):
+    """Single unified todo tool — read/write via optional ``todos`` param."""
+
+    name = "todo"
     description = (
-        "Add a task to the planning list. Returns the full list with status "
-        "counts. IMPORTANT: After planning, execute the tasks immediately "
-        "using terminal / file tools — do NOT keep adding more todos."
+        "Manage your task list for the current session. Use for complex tasks "
+        "with 3+ steps or when the user provides multiple tasks. "
+        "Call with no parameters to read the current list.\n\n"
+        "Writing:\n"
+        "- Provide 'todos' array to create/update items\n"
+        "- merge=false (default): replace the entire list with a fresh plan\n"
+        "- merge=true: update existing items by id, add any new ones\n\n"
+        "Each item: {id: string, content: string, "
+        "status: pending|in_progress|completed|cancelled}\n"
+        "List order is priority. Only ONE item in_progress at a time.\n"
+        "Mark items completed immediately when done. If something fails, "
+        "cancel it and add a revised item.\n\n"
+        "Always returns the full current list."
     )
-    parameters = {
+    parameters: Dict[str, Any] = {
         "type": "object",
         "properties": {
-            "content": {"type": "string", "description": "What to do."},
+            "todos": {
+                "type": "array",
+                "description": "Task items to write. Omit to read current list.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string", "description": "Unique item identifier (you choose the id)."},
+                        "content": {"type": "string", "description": "Task description."},
+                        "status": {
+                            "type": "string",
+                            "enum": ["pending", "in_progress", "completed", "cancelled"],
+                            "description": "Item status.",
+                        },
+                    },
+                    "required": ["id", "content", "status"],
+                },
+            },
+            "merge": {
+                "type": "boolean",
+                "description": (
+                    "true: update existing items by id, add new ones. "
+                    "false (default): replace the entire list."
+                ),
+                "default": False,
+            },
         },
-        "required": ["content"],
+        "required": [],
     }
 
-    def run(self, content: str, **_: Any) -> ToolResult:
-        tid = _store.add(content)
-        items = _store.list()
-        return ToolResult.success(f"Added #{tid}: {content}\n\n{_format_list(items)}")
+    def run(self, todos: Any = None, merge: bool = False, **_: Any) -> ToolResult:
+        # Resolve the store — prefer agent-level, fallback to module default.
+        store: TodoStore = getattr(self, "_todo_store", _default_store)
+
+        if todos is None:
+            # Read mode.
+            items = store.read()
+            return ToolResult.success(_format_result(items))
+
+        # Write mode — validate input.
+        if not isinstance(todos, list):
+            return ToolResult.failure("todos must be an array of {id, content, status} objects")
+
+        # Validate and deduplicate (keep last occurrence per id).
+        cleaned: List[Dict[str, str]] = []
+        seen: set = set()
+        for t in todos:
+            if not isinstance(t, dict):
+                continue
+            tid = str(t.get("id", ""))
+            if not tid:
+                continue
+            if tid in seen:
+                # Deduplicate: remove earlier occurrence.
+                cleaned = [c for c in cleaned if c["id"] != tid]
+            seen.add(tid)
+            cleaned.append(TodoStore._normalise(t))
+
+        if not cleaned:
+            return ToolResult.failure("no valid items in todos array (each needs id, content, status)")
+
+        items = store.write(cleaned, merge=merge)
+        return ToolResult.success(_format_result(items))
 
 
-class TodoUpdateTool(Tool):
-    name = "todo_update"
-    description = (
-        "Update a task's status. Only ONE task should be in_progress at a "
-        "time. Mark tasks done immediately after completing them. Returns "
-        "the full list with status counts."
-    )
-    parameters = {
-        "type": "object",
-        "properties": {
-            "id": {"type": "string", "description": "Todo id from todo_add."},
-            "status": {"type": "string", "enum": ["pending", "in_progress", "done"]},
-        },
-        "required": ["id", "status"],
-    }
-
-    def run(self, id: str, status: str, **_: Any) -> ToolResult:
-        ok = _store.update(id, status)
-        if not ok:
-            return ToolResult.failure(f"could not update todo {id} (unknown id or bad status)")
-        items = _store.list()
-        return ToolResult.success(f"Updated #{id} -> {status}\n\n{_format_list(items)}")
-
-
-class TodoRemoveTool(Tool):
-    name = "todo_remove"
-    description = "Remove a task from the list. Returns the full list with status counts."
-    parameters = {
-        "type": "object",
-        "properties": {
-            "id": {"type": "string", "description": "Todo id to remove."},
-        },
-        "required": ["id"],
-    }
-
-    def run(self, id: str, **_: Any) -> ToolResult:
-        ok = _store.remove(id)
-        if not ok:
-            return ToolResult.failure(f"could not remove todo {id} (unknown id)")
-        items = _store.list()
-        return ToolResult.success(f"Removed #{id}\n\n{_format_list(items)}")
-
-
-class TodoListTool(Tool):
-    name = "todo_list"
-    description = "List all tasks with their current status."
-    parameters = {"type": "object", "properties": {}}
-
-    def run(self, **_: Any) -> ToolResult:
-        items = _store.list()
-        return ToolResult.success(_format_list(items))
-
-
-registry.register(TodoAddTool())
-registry.register(TodoUpdateTool())
-registry.register(TodoRemoveTool())
-registry.register(TodoListTool())
+registry.register(TodoTool())

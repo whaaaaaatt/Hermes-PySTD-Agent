@@ -159,6 +159,10 @@ class AIAgent:
         self._interrupt_message: str = ""
         self._active_stream_body: Any = None  # StreamBody for mid-stream abort
 
+        # Per-agent todo store (aligned with hermes-agent-ref).
+        from ..tools.todo import TodoStore
+        self._todo_store = TodoStore()
+
         # Build the active tool list (respect enabled/disabled from cfg).
         tools_cfg = (cfg.get("tools") or {})
         self.tools: List[Tool] = registry.filter(
@@ -588,6 +592,9 @@ class AIAgent:
         if tool_obj is not None:
             tool_obj._emit_fn = self._emit
             tool_obj._interrupt_event = self._interrupt_event
+        # Inject per-agent todo store.
+        if name == "todo" and tool_obj is not None:
+            tool_obj._todo_store = self._todo_store
         # Inject parent agent context for tools that need it (e.g. delegate_task).
         if name == "delegate_task":
             kwargs["parent_agent"] = self
