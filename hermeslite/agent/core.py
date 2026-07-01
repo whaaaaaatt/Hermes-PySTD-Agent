@@ -236,6 +236,9 @@ class AIAgent:
         self._interrupt_event.clear()
         self._interrupt_message = ""
 
+        # Clean up orphaned assistant messages from interrupted turns.
+        self._cleanup_orphaned_tool_calls()
+
         # Optional auto-compression before the turn starts.
         if self.compress_threshold > 0:
             if self._compress_skip_turns > 0:
@@ -642,6 +645,48 @@ class AIAgent:
     def is_interrupted(self) -> bool:
         """Return True if interrupt() was called."""
         return self._interrupt_event.is_set()
+
+    def _cleanup_orphaned_tool_calls(self) -> None:
+        """Remove assistant messages with tool_calls that lack matching tool results.
+
+        This happens when a turn is interrupted during tool execution:
+        the assistant message (with tool_calls) is persisted, but the
+        corresponding tool results are not.  On the next turn the API
+        would reject the malformed conversation, so we clean up here.
+        """
+        msgs = self.state.list_messages(self.session_id)
+        if not msgs:
+            return
+        # Scan from the end: find the last assistant message with tool_calls.
+        for i in range(len(msgs) - 1, -1, -1):
+            m = msgs[i]
+            if m.role == "assistant" and m.tool_calls:
+                # Collect the tool_call_ids declared in this message.
+                call_ids = {tc.get("id") for tc in m.tool_calls if tc.get("id")}
+                if not call_ids:
+                    break
+                # Check if all have matching tool results AFTER this message.
+                result_ids = {
+                    msg.tool_call_id
+                    for msg in msgs[i + 1:]
+                    if msg.role == "tool" and msg.tool_call_id
+                }
+                missing = call_ids - result_ids
+                if missing:
+                    # Delete orphaned assistant message and any partial
+                    # tool results that follow it.
+                    to_delete = [m.id]
+                    for msg in msgs[i + 1:]:
+                        if msg.role == "tool" and msg.tool_call_id in call_ids:
+                            to_delete.append(msg.id)
+                    for mid in to_delete:
+                        if mid is not None:
+                            self.state.delete_message(mid)
+                    logger.info(
+                        "cleaned up %d orphaned message(s) for session %s",
+                        len(to_delete), self.session_id,
+                    )
+                break  # only check the last assistant(tool_calls) message
 
 
 # ---------------------------------------------------------------------------
