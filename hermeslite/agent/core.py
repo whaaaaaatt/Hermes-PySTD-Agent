@@ -587,6 +587,7 @@ class AIAgent:
         tool_obj = self.registry.get(name)
         if tool_obj is not None:
             tool_obj._emit_fn = self._emit
+            tool_obj._interrupt_event = self._interrupt_event
         # Inject parent agent context for tools that need it (e.g. delegate_task).
         if name == "delegate_task":
             kwargs["parent_agent"] = self

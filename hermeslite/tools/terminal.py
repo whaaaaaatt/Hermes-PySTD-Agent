@@ -278,15 +278,30 @@ _MAX_RETRIES = 3
 _DEFAULT_MAX_TIMEOUT = 300  # seconds — safety cap when timeout=0
 
 
+def _kill_proc_tree(proc: subprocess.Popen) -> None:
+    """Kill a process and all its children (process group)."""
+    import signal
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except (OSError, ProcessLookupError):
+        try:
+            proc.kill()
+        except (OSError, ProcessLookupError):
+            pass
+
+
 def _interruptible_wait(
     proc: subprocess.Popen,
     timeout: float,
-    emit_fn: Any = None,
+    interrupt_event: Any = None,
 ) -> tuple:
-    """Wait for a subprocess to finish, checking for interrupt every 0.5s.
+    """Wait for a subprocess, checking for interrupt every 0.5s.
+
+    ``interrupt_event`` is a ``threading.Event`` — when set, the entire
+    process tree is killed immediately (e.g. from agent.interrupt()).
 
     Returns (stdout_text, returncode).  On timeout or interrupt, kills
-    the process and returns whatever output was captured.
+    the process tree and returns whatever output was captured.
     """
     import select
     deadline = time.monotonic() + timeout if timeout > 0 else None
@@ -295,7 +310,6 @@ def _interruptible_wait(
     while True:
         rc = proc.poll()
         if rc is not None:
-            # Process finished — drain remaining stdout.
             try:
                 remaining = proc.stdout.read() if proc.stdout else ""
                 if remaining:
@@ -304,14 +318,19 @@ def _interruptible_wait(
                 pass
             return ("".join(chunks), rc)
 
-        # Check interrupt flag (set by agent.interrupt() from another thread).
-        if emit_fn is not None:
-            # Walk up to the agent's _interrupt_event via emit_fn closure.
-            # The tool has _emit_fn set by the agent; we check the agent's
-            # interrupt event through a simple attribute lookup.
-            pass  # checked below via the caller's interrupt_event
+        # Check interrupt flag.
+        if interrupt_event is not None and interrupt_event.is_set():
+            _kill_proc_tree(proc)
+            proc.wait()
+            try:
+                remaining = proc.stdout.read() if proc.stdout else ""
+                if remaining:
+                    chunks.append(remaining)
+            except Exception:
+                pass
+            return ("".join(chunks), -1)
 
-        # Check for available data without blocking (Unix only).
+        # Non-blocking read (Unix).
         try:
             if proc.stdout and hasattr(select, "select"):
                 ready, _, _ = select.select([proc.stdout], [], [], 0.5)
@@ -327,10 +346,7 @@ def _interruptible_wait(
 
         # Check deadline.
         if deadline is not None and time.monotonic() >= deadline:
-            try:
-                proc.kill()
-            except OSError:
-                pass
+            _kill_proc_tree(proc)
             proc.wait()
             try:
                 remaining = proc.stdout.read() if proc.stdout else ""
@@ -345,6 +361,7 @@ def _interruptible_wait_sudo(
     proc: subprocess.Popen,
     sudo_stdin: str,
     timeout: float,
+    interrupt_event: Any = None,
 ) -> tuple:
     """Wait for a sudo subprocess, piping password and checking interrupt.
 
@@ -365,12 +382,21 @@ def _interruptible_wait_sudo(
                 pass
             return ("".join(chunks), rc)
 
+        # Check interrupt flag.
+        if interrupt_event is not None and interrupt_event.is_set():
+            _kill_proc_tree(proc)
+            proc.wait()
+            try:
+                remaining = proc.stdout.read() if proc.stdout else ""
+                if remaining:
+                    chunks.append(remaining)
+            except Exception:
+                pass
+            return ("".join(chunks), -1)
+
         # Check deadline.
         if deadline is not None and time.monotonic() >= deadline:
-            try:
-                proc.kill()
-            except OSError:
-                pass
+            _kill_proc_tree(proc)
             proc.wait()
             try:
                 remaining = proc.stdout.read() if proc.stdout else ""
@@ -493,8 +519,12 @@ class TerminalTool(Tool):
                     stderr=subprocess.STDOUT,
                     encoding="utf-8",
                     errors="replace",
+                    start_new_session=True,
                 )
-                out, returncode = _interruptible_wait_sudo(proc, sudo_stdin, effective_timeout)
+                out, returncode = _interruptible_wait_sudo(
+                    proc, sudo_stdin, effective_timeout,
+                    interrupt_event=getattr(self, '_interrupt_event', None),
+                )
                 if returncode == -1:
                     return ToolResult.failure(
                         f"timeout after {effective_timeout}s — command was killed"
@@ -516,8 +546,12 @@ class TerminalTool(Tool):
                         stderr=subprocess.STDOUT,
                         encoding="utf-8",
                         errors="replace",
+                        start_new_session=True,
                     )
-                    out, returncode = _interruptible_wait(proc, effective_timeout)
+                    out, returncode = _interruptible_wait(
+                        proc, effective_timeout,
+                        interrupt_event=getattr(self, '_interrupt_event', None),
+                    )
                     if returncode == -1:
                         return ToolResult.failure(
                             f"timeout after {effective_timeout}s — command was killed"
