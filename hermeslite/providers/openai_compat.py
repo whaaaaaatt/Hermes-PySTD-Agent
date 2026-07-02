@@ -284,14 +284,11 @@ class OpenAICompatProvider:
 
     def _serialize_message(self, m: ChatMessage) -> Dict[str, Any]:
         out: Dict[str, Any] = {"role": m.role}
-        # Content handling:
-        # - assistant with tool_calls and empty content → null (some
-        #   providers reject "" with "text is not set")
-        # - all other messages → "" (providers reject null content)
-        if m.role == "assistant" and m.tool_calls and not m.content:
-            out["content"] = None
-        else:
-            out["content"] = m.content if m.content is not None else ""
+        # Content is ALWAYS a string — never null.  The OpenAI spec allows
+        # null on assistant messages, but many compatible providers reject
+        # it with "text is not set".  The reference implementation also
+        # sends "" for tool-call-only assistant turns.
+        out["content"] = m.content if m.content is not None else ""
         if m.name:
             out["name"] = m.name
         if m.tool_calls:
