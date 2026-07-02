@@ -390,7 +390,6 @@ def _interruptible_wait_sudo(
 
     Returns (stdout_text, returncode).
     """
-    import select
     _pipe_stdin(proc, sudo_stdin)
     deadline = time.monotonic() + timeout if timeout > 0 else None
     chunks: list = []
@@ -419,8 +418,17 @@ def _interruptible_wait_sudo(
         elapsed = time.monotonic() - start
         if rc is not None:
             drain_thread.join(timeout=2.0)
+            out = "".join(chunks)
+            # Detect wrong password: sudo prints "Sorry, try again" or
+            # "sudo: 1 次错误密码尝试" on auth failure.  Return a clear
+            # error instead of letting the caller retry with a stale cache.
+            if rc != 0 and ("Sorry" in out or "try again" in out
+                            or "incorrect password" in out.lower()
+                            or "错误密码" in out):
+                logger.debug("terminal: sudo auth failed after %.1fs — %s", elapsed, out.strip()[:200])
+                return (out, rc)
             logger.debug("terminal: sudo process %d exited rc=%s after %.1fs", proc.pid, rc, elapsed)
-            return ("".join(chunks), rc)
+            return (out, rc)
 
         # Check interrupt flag.
         if interrupt_event is not None and interrupt_event.is_set():
@@ -566,6 +574,13 @@ class TerminalTool(Tool):
                     return ToolResult.failure(
                         f"timeout after {effective_timeout}s — command was killed"
                     )
+                # Clear cached password on sudo auth failure so the next
+                # attempt prompts the user again instead of reusing the
+                # wrong password.
+                if returncode != 0 and ("Sorry" in out or "try again" in out
+                                         or "incorrect password" in out.lower()
+                                         or "错误密码" in out):
+                    _set_cached_sudo_password("")
             except FileNotFoundError as exc:
                 return ToolResult.failure(f"shell not found: {exc}")
             except OSError as exc:
