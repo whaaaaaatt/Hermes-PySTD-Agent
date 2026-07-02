@@ -629,13 +629,18 @@ def _row_to_message(row: sqlite3.Row) -> Message:
     tc_raw = row["tool_calls"]
     tc = json.loads(tc_raw) if tc_raw else None
     raw_content = row["content"]
-    # Deserialise multimodal content: if the stored content looks like
-    # a JSON array, parse it back to a list of content parts.
+    # Deserialise multimodal content: ONLY if the stored JSON array
+    # looks like OpenAI content parts (each has a "type" field).
+    # Tool results like [{"name": "Alice"}] must NOT be parsed as
+    # multimodal — they are plain JSON arrays that should stay strings.
     content: Any = raw_content
     if raw_content and raw_content.startswith("["):
         try:
             parsed = json.loads(raw_content)
-            if isinstance(parsed, list):
+            if (isinstance(parsed, list)
+                    and parsed
+                    and isinstance(parsed[0], dict)
+                    and "type" in parsed[0]):
                 content = parsed
         except (json.JSONDecodeError, ValueError):
             pass
