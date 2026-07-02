@@ -284,10 +284,9 @@ class OpenAICompatProvider:
 
     def _serialize_message(self, m: ChatMessage) -> Dict[str, Any]:
         out: Dict[str, Any] = {"role": m.role}
-        # Always emit the "content" key — even when it is None or "".
-        # Some providers reject the payload when the key is absent entirely.
-        # For assistant tool-call turns the value may be null per the spec.
-        out["content"] = m.content
+        # Emit "content" key — coerce None to "" because some providers
+        # reject ``"content": null`` (e.g. "text is not set" errors).
+        out["content"] = m.content if m.content is not None else ""
         if m.name:
             out["name"] = m.name
         if m.tool_calls:
