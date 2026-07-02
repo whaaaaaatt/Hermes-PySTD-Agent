@@ -880,6 +880,30 @@ class Repl:
                 with lock:
                     sys.stdout.write(C.gray(f"  {marker} {display}\n"))
                     sys.stdout.flush()
+            elif kind == "sudo_request":
+                _end_thinking()
+                # CLI: prompt the user via /dev/tty, then resolve the
+                # pending web sudo event so the agent thread unblocks.
+                from ..tools.approval import prompt_sudo_cli, resolve_web_sudo
+                request_id = payload.get("request_id", "")
+                command = payload.get("command", "")
+                result = prompt_sudo_cli(timeout=120.0)
+                resolve_web_sudo(
+                    request_id,
+                    result.get("action", "reject"),
+                    password=result.get("password", ""),
+                    message=result.get("message", ""),
+                )
+            elif kind == "approval_request":
+                _end_thinking()
+                # CLI: prompt the user, then resolve the pending web
+                # approval event so the agent thread unblocks.
+                from ..tools.approval import prompt_approval_cli, resolve_web_approval
+                approval_id = payload.get("approval_id", "")
+                command = payload.get("command", "")
+                description = payload.get("description", "")
+                decision = prompt_approval_cli(command, description=description)
+                resolve_web_approval(approval_id, decision)
             else:
                 _end_thinking()
                 self._on_event(kind, payload)
