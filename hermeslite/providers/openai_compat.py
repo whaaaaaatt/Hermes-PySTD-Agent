@@ -284,22 +284,37 @@ class OpenAICompatProvider:
 
     def _serialize_message(self, m: ChatMessage) -> Dict[str, Any]:
         out: Dict[str, Any] = {"role": m.role}
-        # Content: use " " (single space) as fallback instead of "".
-        # Some providers (MiMo, Bedrock) reject empty-string content
-        # with "text is not set" errors.
-        out["content"] = m.content if m.content else " "
+        out["content"] = m.content if m.content is not None else ""
         if m.name:
             out["name"] = m.name
         if m.tool_calls:
-            out["tool_calls"] = m.tool_calls
+            # Re-serialize each tool_call's arguments as compact JSON
+            # with sorted keys — matches reference behaviour and avoids
+            # provider rejections from non-standard formatting.
+            normalized: List[Dict[str, Any]] = []
+            for tc in m.tool_calls:
+                tc_copy = dict(tc)
+                fn = dict(tc_copy.get("function") or {})
+                raw_args = fn.get("arguments", "")
+                if isinstance(raw_args, str):
+                    try:
+                        fn["arguments"] = json.dumps(
+                            json.loads(raw_args),
+                            separators=(",", ":"),
+                            sort_keys=True,
+                            ensure_ascii=False,
+                        )
+                    except (json.JSONDecodeError, TypeError):
+                        pass  # keep original if parsing fails
+                tc_copy["function"] = fn
+                normalized.append(tc_copy)
+            out["tool_calls"] = normalized
         if m.tool_call_id:
             out["tool_call_id"] = m.tool_call_id
-        # Echo reasoning_content back to the API.  DeepSeek, Kimi, and
-        # MiMo in thinking mode require this field on EVERY assistant
-        # message that has tool_calls — even if empty.  Empty string ""
-        # is rejected by some providers; use " " (single space) instead.
-        # For providers that don't recognise the field, it is silently
-        # ignored.
+        # Echo reasoning_content on assistant messages.  DeepSeek,
+        # Kimi, and MiMo require this field on every assistant message
+        # with tool_calls.  Empty value must be " " (single space),
+        # not "" — providers reject empty string.
         if m.role == "assistant":
             out["reasoning_content"] = m.reasoning_content or " "
         return out
