@@ -295,12 +295,13 @@ class OpenAICompatProvider:
             out["tool_calls"] = m.tool_calls
         if m.tool_call_id:
             out["tool_call_id"] = m.tool_call_id
-        # Echo reasoning_content back to the API when present.  DeepSeek,
-        # Kimi, and MiMo in thinking mode require this field on every
-        # assistant message; omitting it causes HTTP 400.  For providers
-        # that don't recognise the field, it is silently ignored.
-        if m.reasoning_content:
-            out["reasoning_content"] = m.reasoning_content
+        # Echo reasoning_content back to the API.  DeepSeek, Kimi, and
+        # MiMo in thinking mode require this field on EVERY assistant
+        # message that has tool_calls — even if empty.  Omitting it
+        # causes HTTP 400.  For providers that don't recognise the
+        # field, it is silently ignored.
+        if m.role == "assistant":
+            out["reasoning_content"] = m.reasoning_content or ""
         return out
 
     def _serialize_tool(self, t: ToolSpec) -> Dict[str, Any]:
