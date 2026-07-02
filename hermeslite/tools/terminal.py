@@ -189,13 +189,12 @@ def _transform_sudo(command: str) -> str:
 def _pipe_stdin(proc: subprocess.Popen, data: str) -> None:
     """Write data to proc.stdin on a daemon thread, then close the pipe.
 
-    Closes through proc.stdin (TextIOWrapper) so Python's wrapper state
-    stays consistent — required for sudo -S to see EOF cleanly.
+    Since Popen is created with encoding='utf-8', proc.stdin is a
+    TextIOWrapper that expects str, not bytes.
     """
     def _write():
         try:
-            raw = data.encode("utf-8") if isinstance(data, str) else data
-            proc.stdin.write(raw)
+            proc.stdin.write(data)
             proc.stdin.flush()
         except (BrokenPipeError, OSError):
             pass
