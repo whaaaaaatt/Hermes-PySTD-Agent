@@ -187,19 +187,23 @@ def _transform_sudo(command: str) -> str:
 
 
 def _pipe_stdin(proc: subprocess.Popen, data: str) -> None:
-    """Write data to proc.stdin on a daemon thread to avoid pipe-buffer deadlocks.
+    """Write data to proc.stdin on a daemon thread, then close the pipe.
 
-    NOTE: We do NOT close stdin here — ``proc.communicate()`` closes it
-    after reading stdout/stderr.  Closing early causes "I/O operation on
-    closed file" when ``communicate()`` tries to flush.
+    Closes through proc.stdin (TextIOWrapper) so Python's wrapper state
+    stays consistent — required for sudo -S to see EOF cleanly.
     """
     def _write():
         try:
             raw = data.encode("utf-8") if isinstance(data, str) else data
-            target = getattr(proc.stdin, "buffer", proc.stdin)
-            target.write(raw)
+            proc.stdin.write(raw)
+            proc.stdin.flush()
         except (BrokenPipeError, OSError):
             pass
+        finally:
+            try:
+                proc.stdin.close()
+            except Exception:
+                pass
     threading.Thread(target=_write, daemon=True).start()
 
 
@@ -306,6 +310,8 @@ def _interruptible_wait(
     ``interrupt_event`` is a ``threading.Event`` — when set, the entire
     process tree is killed immediately (e.g. from agent.interrupt()).
 
+    Continuously drains stdout on a daemon thread to prevent deadlocks.
+
     Returns (stdout_text, returncode).  On timeout or interrupt, kills
     the process tree and returns whatever output was captured.
     """
@@ -318,17 +324,25 @@ def _interruptible_wait(
         proc.pid, timeout, deadline, interrupt_event is not None,
     )
 
+    # Drain stdout continuously on a daemon thread.
+    def _drain():
+        try:
+            while True:
+                chunk = proc.stdout.read(4096)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+        except Exception:
+            pass
+    drain_thread = threading.Thread(target=_drain, daemon=True)
+    drain_thread.start()
+
     while True:
         rc = proc.poll()
         elapsed = time.monotonic() - start
         if rc is not None:
+            drain_thread.join(timeout=2.0)
             logger.debug("terminal: process %d exited with rc=%s after %.1fs", proc.pid, rc, elapsed)
-            try:
-                remaining = proc.stdout.read() if proc.stdout else ""
-                if remaining:
-                    chunks.append(remaining)
-            except Exception:
-                pass
             return ("".join(chunks), rc)
 
         # Check interrupt flag.
@@ -336,29 +350,9 @@ def _interruptible_wait(
             logger.debug("terminal: interrupt_event is set after %.1fs — killing pid %d", elapsed, proc.pid)
             _kill_proc_tree(proc)
             proc.wait()
-            try:
-                remaining = proc.stdout.read() if proc.stdout else ""
-                if remaining:
-                    chunks.append(remaining)
-            except Exception:
-                pass
+            drain_thread.join(timeout=2.0)
             logger.debug("terminal: interrupted — returning after %.1fs", elapsed)
             return ("".join(chunks), -1)
-
-        # Non-blocking read (Unix).
-        try:
-            if proc.stdout and hasattr(select, "select"):
-                ready, _, _ = select.select([proc.stdout], [], [], 0.5)
-                if ready:
-                    chunk = proc.stdout.read(4096)
-                    if chunk:
-                        chunks.append(chunk)
-                    continue
-            else:
-                time.sleep(0.5)
-        except Exception as exc:
-            logger.debug("terminal: select/read exception: %s", exc)
-            time.sleep(0.5)
 
         # Check deadline.
         if deadline is not None and time.monotonic() >= deadline:
@@ -368,12 +362,7 @@ def _interruptible_wait(
             )
             _kill_proc_tree(proc)
             proc.wait()
-            try:
-                remaining = proc.stdout.read() if proc.stdout else ""
-                if remaining:
-                    chunks.append(remaining)
-            except Exception:
-                pass
+            drain_thread.join(timeout=2.0)
             logger.debug("terminal: timeout kill complete — returning after %.1fs", elapsed)
             return ("".join(chunks), -1)
 
@@ -385,6 +374,8 @@ def _interruptible_wait(
                 proc.pid, elapsed, remaining, len(chunks),
             )
 
+        time.sleep(0.5)
+
 
 def _interruptible_wait_sudo(
     proc: subprocess.Popen,
@@ -394,8 +385,12 @@ def _interruptible_wait_sudo(
 ) -> tuple:
     """Wait for a sudo subprocess, piping password and checking interrupt.
 
+    Continuously drains stdout on a daemon thread to prevent deadlocks
+    when the child writes large output.
+
     Returns (stdout_text, returncode).
     """
+    import select
     _pipe_stdin(proc, sudo_stdin)
     deadline = time.monotonic() + timeout if timeout > 0 else None
     chunks: list = []
@@ -405,17 +400,26 @@ def _interruptible_wait_sudo(
         proc.pid, timeout,
     )
 
+    # Drain stdout continuously on a daemon thread (prevents pipe-buffer
+    # deadlock when the child writes large output).
+    def _drain():
+        try:
+            while True:
+                chunk = proc.stdout.read(4096)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+        except Exception:
+            pass
+    drain_thread = threading.Thread(target=_drain, daemon=True)
+    drain_thread.start()
+
     while True:
         rc = proc.poll()
         elapsed = time.monotonic() - start
         if rc is not None:
+            drain_thread.join(timeout=2.0)
             logger.debug("terminal: sudo process %d exited rc=%s after %.1fs", proc.pid, rc, elapsed)
-            try:
-                remaining = proc.stdout.read() if proc.stdout else ""
-                if remaining:
-                    chunks.append(remaining)
-            except Exception:
-                pass
             return ("".join(chunks), rc)
 
         # Check interrupt flag.
@@ -423,12 +427,7 @@ def _interruptible_wait_sudo(
             logger.debug("terminal: interrupt set during sudo — killing pid %d after %.1fs", proc.pid, elapsed)
             _kill_proc_tree(proc)
             proc.wait()
-            try:
-                remaining = proc.stdout.read() if proc.stdout else ""
-                if remaining:
-                    chunks.append(remaining)
-            except Exception:
-                pass
+            drain_thread.join(timeout=2.0)
             return ("".join(chunks), -1)
 
         # Check deadline.
@@ -436,12 +435,7 @@ def _interruptible_wait_sudo(
             logger.debug("terminal: TIMEOUT sudo pid %d after %.1fs — killing", proc.pid, elapsed)
             _kill_proc_tree(proc)
             proc.wait()
-            try:
-                remaining = proc.stdout.read() if proc.stdout else ""
-                if remaining:
-                    chunks.append(remaining)
-            except Exception:
-                pass
+            drain_thread.join(timeout=2.0)
             return ("".join(chunks), -1)
 
         time.sleep(0.5)
